@@ -2,6 +2,8 @@ import { ORPCError, os } from "@orpc/server";
 import * as v from "valibot";
 import {
   approveAndMergePr,
+  GithubAuthError,
+  GithubRateLimitError,
   getGithubTokenForUser,
   listAccessibleRepos,
   listDependabotPrs,
@@ -17,6 +19,23 @@ const authed = base.use(async ({ context, next }) => {
   return next({ context: { ...context, user: context.user } });
 });
 
+const githubGuard = authed.use(async ({ next }) => {
+  try {
+    return await next();
+  } catch (err) {
+    if (err instanceof GithubRateLimitError) {
+      throw new ORPCError("TOO_MANY_REQUESTS", {
+        message: `GitHub rate limit hit. Try again in ${err.retryAfterSeconds}s.`,
+        data: { retryAfterSeconds: err.retryAfterSeconds },
+      });
+    }
+    if (err instanceof GithubAuthError) {
+      throw new ORPCError("FORBIDDEN", { message: err.message });
+    }
+    throw err;
+  }
+});
+
 const MergeMethod = v.picklist(["merge", "squash", "rebase"]);
 
 const PrRef = v.object({
@@ -29,19 +48,19 @@ export const router = {
   me: authed.handler(async ({ context }) => context.user),
 
   repos: {
-    list: authed.handler(async ({ context }) => {
+    list: githubGuard.handler(async ({ context }) => {
       const token = await getGithubTokenForUser(context.user.id);
       return listAccessibleRepos(token);
     }),
   },
 
   dependabot: {
-    list: authed.handler(async ({ context }) => {
+    list: githubGuard.handler(async ({ context }) => {
       const token = await getGithubTokenForUser(context.user.id);
       return listDependabotPrs(token);
     }),
 
-    approveAndMerge: authed
+    approveAndMerge: githubGuard
       .input(
         v.object({
           prs: v.pipe(v.array(PrRef), v.minLength(1), v.maxLength(100)),

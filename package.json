@@ -19,6 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@octokit/plugin-throttling": "11.0.3",
     "@octokit/rest": "^22.0.1",
     "@orpc/client": "^1.14.3",
     "@orpc/server": "^1.14.3",

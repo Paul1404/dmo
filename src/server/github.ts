@@ -1,3 +1,4 @@
+import { throttling } from "@octokit/plugin-throttling";
 import { Octokit } from "@octokit/rest";
 import { and, eq } from "drizzle-orm";
 import { db } from "~/server/db";
@@ -11,15 +12,50 @@ export async function getGithubTokenForUser(userId: string): Promise<string> {
     .limit(1);
 
   if (!account?.accessToken) {
-    throw new Error("No GitHub access token linked to this account");
+    throw new GithubAuthError("No GitHub access token linked to this account");
   }
   return account.accessToken;
 }
 
+export class GithubAuthError extends Error {
+  readonly kind = "auth" as const;
+}
+
+export class GithubRateLimitError extends Error {
+  readonly kind = "rate_limit" as const;
+  retryAfterSeconds: number;
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+const ThrottledOctokit = Octokit.plugin(throttling);
+
 export function octokitFor(token: string): Octokit {
-  return new Octokit({
+  return new ThrottledOctokit({
     auth: token,
     userAgent: "dmo/0.1",
+    throttle: {
+      onRateLimit: (retryAfter, options, _octokit, retryCount) => {
+        if (retryCount < 1 && retryAfter <= 60) {
+          return true;
+        }
+        throw new GithubRateLimitError(
+          `GitHub rate limit hit on ${options.method} ${options.url}. Retry after ${retryAfter}s.`,
+          retryAfter,
+        );
+      },
+      onSecondaryRateLimit: (retryAfter, options, _octokit, retryCount) => {
+        if (retryCount < 2 && retryAfter <= 30) {
+          return true;
+        }
+        throw new GithubRateLimitError(
+          `GitHub secondary rate limit hit on ${options.method} ${options.url}. Retry after ${retryAfter}s.`,
+          retryAfter,
+        );
+      },
+    },
   });
 }
 
@@ -124,12 +160,17 @@ export async function listDependabotPrs(token: string): Promise<DependabotPr[]> 
   let page = 1;
   const perPage = 100;
   while (true) {
-    const { data } = await octokit.rest.search.issuesAndPullRequests({
-      q: query,
-      per_page: perPage,
-      page,
-      advanced_search: "true",
-    });
+    let data: Awaited<ReturnType<typeof octokit.rest.search.issuesAndPullRequests>>["data"];
+    try {
+      ({ data } = await octokit.rest.search.issuesAndPullRequests({
+        q: query,
+        per_page: perPage,
+        page,
+        advanced_search: "true",
+      }));
+    } catch (err) {
+      throw mapGithubError(err, "search dependabot pull requests");
+    }
 
     for (const item of data.items) {
       // repository_url is like https://api.github.com/repos/owner/repo
@@ -164,8 +205,26 @@ export async function listDependabotPrs(token: string): Promise<DependabotPr[]> 
     if (results.length >= data.total_count) break;
     page += 1;
     if (page > 10) break; // hard cap, 1000 PRs
+    // Small pacing delay to stay under GitHub search secondary rate limits.
+    await new Promise((r) => setTimeout(r, 250));
   }
   return results;
+}
+
+function mapGithubError(err: unknown, action: string): Error {
+  if (err instanceof GithubRateLimitError || err instanceof GithubAuthError) return err;
+  const status = (err as { status?: number }).status;
+  const message = err instanceof Error ? err.message : String(err);
+  if (status === 401) return new GithubAuthError(`GitHub rejected the token. Sign in again.`);
+  if (status === 403) {
+    // 403 without rate-limit handler hit typically means missing scope, SSO, or org access.
+    return new GithubAuthError(
+      `GitHub denied access while trying to ${action}. Check token scopes (repo) and any org SAML SSO authorization.`,
+    );
+  }
+  if (status === 422)
+    return new Error(`GitHub validation failed while trying to ${action}: ${message}`);
+  return new Error(`GitHub error while trying to ${action}: ${message}`);
 }
 
 export type RepoSummary = {
@@ -178,18 +237,22 @@ export type RepoSummary = {
 
 export async function listAccessibleRepos(token: string): Promise<RepoSummary[]> {
   const octokit = octokitFor(token);
-  const repos = await octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
-    per_page: 100,
-    sort: "pushed",
-    affiliation: "owner,collaborator,organization_member",
-  });
-  return repos.map((r) => ({
-    fullName: r.full_name,
-    owner: r.owner.login,
-    name: r.name,
-    private: r.private,
-    htmlUrl: r.html_url,
-  }));
+  try {
+    const repos = await octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
+      per_page: 100,
+      sort: "pushed",
+      affiliation: "owner,collaborator,organization_member",
+    });
+    return repos.map((r) => ({
+      fullName: r.full_name,
+      owner: r.owner.login,
+      name: r.name,
+      private: r.private,
+      htmlUrl: r.html_url,
+    }));
+  } catch (err) {
+    throw mapGithubError(err, "list accessible repositories");
+  }
 }
 
 export type PrActionResult = {
