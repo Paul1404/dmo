@@ -64,15 +64,14 @@ export function octokitFor(token: string): Octokit {
           retryCount,
           kind: "secondary" as const,
         };
-        if (retryCount < 2 && retryAfter <= 30) {
-          log.warn("github secondary rate limit hit, retrying", ctx);
+        // Secondary rate limits on /search/* almost always return retryAfter ~60s.
+        // Wait it out once rather than failing fast and asking the user to retry.
+        if (retryCount < 1 && retryAfter <= 90) {
+          log.warn("github secondary rate limit hit, waiting and retrying", ctx);
           return true;
         }
         log.error("github secondary rate limit exhausted", ctx);
-        throw new GithubRateLimitError(
-          `GitHub secondary rate limit hit on ${options.method} ${options.url}. Retry after ${retryAfter}s.`,
-          retryAfter,
-        );
+        return false;
       },
     },
   });
@@ -171,72 +170,145 @@ function parseTitle(title: string): {
   return { dependency: m[1] ?? null, from: m[2] ?? null, to: m[3] ?? null };
 }
 
-export async function listDependabotPrs(token: string): Promise<DependabotPr[]> {
-  const octokit = octokitFor(token);
-  const query = "is:pr is:open author:app/dependabot archived:false";
+const DEPENDABOT_CACHE_TTL_MS = 60_000;
+const dependabotCache = new Map<string, { data: DependabotPr[]; expiresAt: number }>();
 
-  const results: DependabotPr[] = [];
-  let page = 1;
-  const perPage = 100;
-  while (true) {
-    let data: Awaited<ReturnType<typeof octokit.rest.search.issuesAndPullRequests>>["data"];
-    try {
-      ({ data } = await octokit.rest.search.issuesAndPullRequests({
-        q: query,
-        per_page: perPage,
-        page,
-        advanced_search: "true",
-      }));
-    } catch (err) {
-      throw mapGithubError(err, "search dependabot pull requests");
-    }
+export function invalidateDependabotCache(userId: string): void {
+  dependabotCache.delete(userId);
+}
 
-    for (const item of data.items) {
-      // repository_url is like https://api.github.com/repos/owner/repo
-      const repoFullName = item.repository_url.replace("https://api.github.com/repos/", "");
-      const [owner = "", name = ""] = repoFullName.split("/");
-      const labels = item.labels
-        .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
-        .filter(Boolean);
-      const parsed = parseTitle(item.title);
-      results.push({
-        id: item.id,
-        nodeId: item.node_id,
-        number: item.number,
-        title: item.title,
-        htmlUrl: item.html_url,
-        createdAt: item.created_at,
-        updatedAt: item.updated_at,
-        repoFullName,
-        repoOwner: owner,
-        repoName: name,
-        ecosystem: detectEcosystem(labels),
-        updateType: classifyUpdate(parsed.from, parsed.to),
-        dependency: parsed.dependency,
-        fromVersion: parsed.from,
-        toVersion: parsed.to,
-        draft: Boolean(item.draft),
-        labels,
-      });
-    }
+const DEPENDABOT_LOGIN = "dependabot[bot]";
 
-    if (data.items.length < perPage) break;
-    if (results.length >= data.total_count) break;
-    page += 1;
-    if (page > 10) break; // hard cap, 1000 PRs
-    // Small pacing delay to stay under GitHub search secondary rate limits.
-    await new Promise((r) => setTimeout(r, 250));
+export type WatchedRepoRef = { owner: string; name: string };
+
+async function fetchDependabotPrsFromRepo(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+): Promise<DependabotPr[]> {
+  const repoFullName = `${owner}/${repo}`;
+  const all = await octokit.paginate(octokit.rest.pulls.list, {
+    owner,
+    repo,
+    state: "open",
+    per_page: 100,
+    sort: "created",
+    direction: "desc",
+  });
+  const out: DependabotPr[] = [];
+  for (const pr of all) {
+    if (pr.user?.login !== DEPENDABOT_LOGIN) continue;
+    const labels = pr.labels
+      .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
+      .filter(Boolean);
+    const parsed = parseTitle(pr.title);
+    out.push({
+      id: pr.id,
+      nodeId: pr.node_id,
+      number: pr.number,
+      title: pr.title,
+      htmlUrl: pr.html_url,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      repoFullName,
+      repoOwner: owner,
+      repoName: repo,
+      ecosystem: detectEcosystem(labels),
+      updateType: classifyUpdate(parsed.from, parsed.to),
+      dependency: parsed.dependency,
+      fromVersion: parsed.from,
+      toVersion: parsed.to,
+      draft: Boolean(pr.draft),
+      labels,
+    });
   }
+  return out;
+}
+
+export async function listDependabotPrs(
+  userId: string,
+  token: string,
+  repos: WatchedRepoRef[],
+): Promise<DependabotPr[]> {
+  const now = Date.now();
+  const cached = dependabotCache.get(userId);
+  if (cached && cached.expiresAt > now) return cached.data;
+
+  if (repos.length === 0) {
+    dependabotCache.set(userId, { data: [], expiresAt: now + DEPENDABOT_CACHE_TTL_MS });
+    return [];
+  }
+
+  const octokit = octokitFor(token);
+  const results: DependabotPr[] = [];
+  const concurrency = Math.min(6, repos.length);
+  let cursor = 0;
+  let fatal: Error | null = null;
+
+  async function worker() {
+    while (cursor < repos.length && !fatal) {
+      const i = cursor++;
+      const repo = repos[i];
+      if (!repo) continue;
+      try {
+        const prs = await fetchDependabotPrsFromRepo(octokit, repo.owner, repo.name);
+        results.push(...prs);
+      } catch (err) {
+        const mapped = mapGithubError(err, `list PRs for ${repo.owner}/${repo.name}`);
+        if (mapped instanceof GithubRateLimitError) {
+          fatal = mapped;
+          return;
+        }
+        log.warn("dependabot fetch failed for repo", {
+          repo: `${repo.owner}/${repo.name}`,
+          message: mapped.message,
+        });
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  if (fatal) throw fatal;
+
+  results.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  dependabotCache.set(userId, { data: results, expiresAt: Date.now() + DEPENDABOT_CACHE_TTL_MS });
   return results;
+}
+
+type OctokitErrorShape = {
+  status?: number;
+  response?: {
+    headers?: Record<string, string | undefined>;
+    data?: { message?: string };
+  };
+};
+
+function detectRateLimit(err: OctokitErrorShape): GithubRateLimitError | null {
+  const status = err.status;
+  if (status !== 403 && status !== 429) return null;
+  const headers = err.response?.headers ?? {};
+  const remaining = headers["x-ratelimit-remaining"];
+  const retryAfterHeader = headers["retry-after"];
+  const body = err.response?.data?.message ?? "";
+  const looksLikeRateLimit =
+    remaining === "0" ||
+    retryAfterHeader != null ||
+    /rate limit/i.test(body) ||
+    /abuse/i.test(body);
+  if (!looksLikeRateLimit) return null;
+  const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) || 60 : 60;
+  return new GithubRateLimitError(`GitHub rate limit hit. Retry after ${retryAfter}s.`, retryAfter);
 }
 
 function mapGithubError(err: unknown, action: string): Error {
   if (err instanceof GithubRateLimitError || err instanceof GithubAuthError) return err;
-  const status = (err as { status?: number }).status;
+  const e = err as OctokitErrorShape;
+  const status = e.status;
   const message = err instanceof Error ? err.message : String(err);
+  const rateLimit = detectRateLimit(e);
+  if (rateLimit) return rateLimit;
   if (status === 401) return new GithubAuthError(`GitHub rejected the token. Sign in again.`);
   if (status === 403) {
-    // 403 without rate-limit handler hit typically means missing scope, SSO, or org access.
     return new GithubAuthError(
       `GitHub denied access while trying to ${action}. Check token scopes (repo) and any org SAML SSO authorization.`,
     );
