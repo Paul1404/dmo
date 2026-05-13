@@ -1,0 +1,12 @@
+node_modules
+dist
+.output
+.tanstack
+.vinxi
+.git
+.github
+.vscode
+.env
+.env.*
+*.log
+README.md
