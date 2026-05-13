@@ -18,6 +18,13 @@ export async function getGithubTokenForUser(userId: string): Promise<string> {
   return account.accessToken;
 }
 
+export async function getGithubLoginForUser(userId: string): Promise<string> {
+  const token = await getGithubTokenForUser(userId);
+  const octokit = octokitFor(token);
+  const { data } = await octokit.users.getAuthenticated();
+  return data.login;
+}
+
 export class GithubAuthError extends Error {
   readonly kind = "auth" as const;
 }
