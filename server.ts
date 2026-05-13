@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import handler from "./dist/server/server.js";
 import { startWorker, stopWorker } from "./src/server/jobs.ts";
 import { log } from "./src/server/logger.ts";
+import { startOrchestratorWorker, stopOrchestratorWorker } from "./src/server/orchestrator.ts";
 
 const clientDir = resolve(import.meta.dir, "dist/client");
 const port = Number(process.env.PORT) || 3000;
@@ -53,11 +54,13 @@ Bun.serve({
 
 log.info("server listening", { port });
 startWorker();
+startOrchestratorWorker();
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     log.info("shutdown signal received", { signal });
     stopWorker();
+    stopOrchestratorWorker();
     process.exit(0);
   });
 }

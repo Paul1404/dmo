@@ -1,11 +1,14 @@
 import { ORPCError, os } from "@orpc/server";
 import { eq } from "drizzle-orm";
 import * as v from "valibot";
+import { parse as parseYaml } from "yaml";
 import { db } from "~/server/db";
-import { watchedRepos } from "~/server/db/schema";
+import { dependabotTemplates, watchedRepos } from "~/server/db/schema";
 import {
+  type DependabotConfigFile,
   GithubAuthError,
   GithubRateLimitError,
+  getDependabotConfig,
   getGithubTokenForUser,
   invalidateDependabotCache,
   listAccessibleRepos,
@@ -13,6 +16,12 @@ import {
 } from "~/server/github";
 import { cancelJob, enqueueJob, listActivePrKeysForUser, listJobsForUser } from "~/server/jobs";
 import { log } from "~/server/logger";
+import {
+  cancelOrchestratorRun,
+  enqueueOrchestratorRun,
+  getOrchestratorRun,
+  listOrchestratorRuns,
+} from "~/server/orchestrator";
 import type { RpcContext } from "./context";
 
 const base = os.$context<RpcContext>();
@@ -126,6 +135,165 @@ export const router = {
         activeKeys: Array.from(activeKeys),
       };
     }),
+  },
+
+  orchestrator: {
+    getTemplate: authed.handler(async ({ context }) => {
+      const [row] = await db
+        .select()
+        .from(dependabotTemplates)
+        .where(eq(dependabotTemplates.userId, context.user.id))
+        .limit(1);
+      return row ? { yamlContent: row.yamlContent, updatedAt: row.updatedAt.toISOString() } : null;
+    }),
+
+    saveTemplate: authed
+      .input(
+        v.object({
+          yamlContent: v.pipe(v.string(), v.minLength(1), v.maxLength(20_000)),
+        }),
+      )
+      .handler(async ({ context, input }) => {
+        try {
+          parseYaml(input.yamlContent);
+        } catch (err) {
+          throw new ORPCError("VALIDATION_FAILED", {
+            message: err instanceof Error ? err.message : "Invalid YAML",
+          });
+        }
+        const now = new Date();
+        await db
+          .insert(dependabotTemplates)
+          .values({
+            userId: context.user.id,
+            yamlContent: input.yamlContent,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: dependabotTemplates.userId,
+            set: { yamlContent: input.yamlContent, updatedAt: now },
+          });
+        return { updatedAt: now.toISOString() };
+      }),
+
+    getCurrent: githubGuard.handler(async ({ context }) => {
+      const watched = await getWatchedRepos(context.user.id);
+      if (watched.length === 0) return { repos: [] };
+      const token = await getGithubTokenForUser(context.user.id);
+      const concurrency = Math.min(6, watched.length);
+      let cursor = 0;
+      const results = new Array<{
+        owner: string;
+        name: string;
+        config: { content: string; path: string } | null;
+        error: string | null;
+      }>(watched.length);
+      let fatal: Error | null = null;
+
+      async function worker() {
+        while (cursor < watched.length && !fatal) {
+          const i = cursor++;
+          const repo = watched[i];
+          if (!repo) continue;
+          try {
+            const config: DependabotConfigFile | null = await getDependabotConfig(
+              token,
+              repo.owner,
+              repo.name,
+            );
+            results[i] = {
+              owner: repo.owner,
+              name: repo.name,
+              config: config ? { content: config.content, path: config.path } : null,
+              error: null,
+            };
+          } catch (err) {
+            if (err instanceof GithubRateLimitError) {
+              fatal = err;
+              return;
+            }
+            results[i] = {
+              owner: repo.owner,
+              name: repo.name,
+              config: null,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        }
+      }
+
+      await Promise.all(Array.from({ length: concurrency }, worker));
+      if (fatal) throw fatal;
+      return { repos: results.filter(Boolean) };
+    }),
+
+    startRun: githubGuard
+      .input(
+        v.object({
+          repos: v.pipe(v.array(RepoRef), v.minLength(1), v.maxLength(50)),
+          commitMessage: v.optional(
+            v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+            "chore(deps): sync dependabot config",
+          ),
+          prTitle: v.optional(
+            v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+            "chore(deps): sync dependabot config",
+          ),
+          prBody: v.optional(
+            v.pipe(v.string(), v.maxLength(2_000)),
+            "Synced via DMO orchestrator.",
+          ),
+        }),
+      )
+      .handler(async ({ context, input }) => {
+        const [template] = await db
+          .select()
+          .from(dependabotTemplates)
+          .where(eq(dependabotTemplates.userId, context.user.id))
+          .limit(1);
+        if (!template) {
+          throw new ORPCError("VALIDATION_FAILED", {
+            message: "Save a template before starting a run",
+          });
+        }
+        const watched = await getWatchedRepos(context.user.id);
+        const watchedKeys = new Set(watched.map((r) => `${r.owner}/${r.name}`));
+        const requested = input.repos.filter((r) => watchedKeys.has(`${r.owner}/${r.name}`));
+        if (requested.length === 0) {
+          throw new ORPCError("VALIDATION_FAILED", {
+            message: "None of the selected repositories are in your watch list",
+          });
+        }
+        const runId = await enqueueOrchestratorRun({
+          userId: context.user.id,
+          templateSnapshot: template.yamlContent,
+          commitMessage: input.commitMessage,
+          prTitle: input.prTitle,
+          prBody: input.prBody,
+          repos: requested,
+        });
+        return { runId, count: requested.length };
+      }),
+
+    listRuns: authed.handler(async ({ context }) => {
+      return listOrchestratorRuns(context.user.id);
+    }),
+
+    getRun: authed
+      .input(v.object({ runId: v.pipe(v.string(), v.minLength(1)) }))
+      .handler(async ({ context, input }) => {
+        const run = await getOrchestratorRun(context.user.id, input.runId);
+        if (!run) throw new ORPCError("NOT_FOUND", { message: "Run not found" });
+        return run;
+      }),
+
+    cancelRun: authed
+      .input(v.object({ runId: v.pipe(v.string(), v.minLength(1)) }))
+      .handler(async ({ context, input }) => {
+        const ok = await cancelOrchestratorRun(context.user.id, input.runId);
+        if (!ok) throw new ORPCError("NOT_FOUND", { message: "Run not found or already done" });
+        return { ok: true };
+      }),
   },
 
   jobs: {
