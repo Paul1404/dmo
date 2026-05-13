@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import handler from "./dist/server/server.js";
+import { log } from "./src/server/logger.ts";
 
 const clientDir = resolve(import.meta.dir, "dist/client");
 const port = Number(process.env.PORT) || 3000;
@@ -43,6 +44,17 @@ Bun.serve({
 
     return handler.fetch(req);
   },
+  error(err) {
+    log.error("unhandled request error", { err });
+    return new Response("Internal Server Error", { status: 500 });
+  },
 });
 
-console.log(`listening on :${port}`);
+log.info("server listening", { port });
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    log.info("shutdown signal received", { signal });
+    process.exit(0);
+  });
+}

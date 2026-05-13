@@ -3,6 +3,7 @@ import { Octokit } from "@octokit/rest";
 import { and, eq } from "drizzle-orm";
 import { db } from "~/server/db";
 import { accounts } from "~/server/db/schema";
+import { log } from "~/server/logger";
 
 export async function getGithubTokenForUser(userId: string): Promise<string> {
   const [account] = await db
@@ -38,18 +39,36 @@ export function octokitFor(token: string): Octokit {
     userAgent: "dmo/0.1",
     throttle: {
       onRateLimit: (retryAfter, options, _octokit, retryCount) => {
+        const ctx = {
+          method: options.method,
+          url: options.url,
+          retryAfter,
+          retryCount,
+          kind: "primary" as const,
+        };
         if (retryCount < 1 && retryAfter <= 60) {
+          log.warn("github rate limit hit, retrying", ctx);
           return true;
         }
+        log.error("github rate limit exhausted", ctx);
         throw new GithubRateLimitError(
           `GitHub rate limit hit on ${options.method} ${options.url}. Retry after ${retryAfter}s.`,
           retryAfter,
         );
       },
       onSecondaryRateLimit: (retryAfter, options, _octokit, retryCount) => {
+        const ctx = {
+          method: options.method,
+          url: options.url,
+          retryAfter,
+          retryCount,
+          kind: "secondary" as const,
+        };
         if (retryCount < 2 && retryAfter <= 30) {
+          log.warn("github secondary rate limit hit, retrying", ctx);
           return true;
         }
+        log.error("github secondary rate limit exhausted", ctx);
         throw new GithubRateLimitError(
           `GitHub secondary rate limit hit on ${options.method} ${options.url}. Retry after ${retryAfter}s.`,
           retryAfter,
