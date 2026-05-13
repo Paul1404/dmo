@@ -5,19 +5,28 @@ import { getRequest } from "@tanstack/react-start/server";
 import {
   AlertCircle,
   Check,
+  ChevronDown,
+  ChevronUp,
   ExternalLink,
   FileCode,
   GitBranch,
   GitMerge,
   Loader2,
   LogOut,
+  Network,
   Package,
   RefreshCw,
+  Search,
   Settings,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import {
+  DependencyGraph,
+  type GraphInputRepo,
+  type GraphOutdatedDep,
+} from "~/components/DependencyGraph";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
@@ -490,6 +499,10 @@ function DashboardPage() {
             )}
           </CardContent>
         </Card>
+
+        {watchedCount && watchedCount > 0 ? (
+          <DependencyOverviewSection prList={fullPrList} />
+        ) : null}
       </main>
     </div>
   );
@@ -783,6 +796,211 @@ function JobStatusBadge({ status }: { status: JobStatus }) {
   };
   const { variant, label } = map[status];
   return <Badge variant={variant}>{label}</Badge>;
+}
+
+type GraphEcosystem = "npm" | "docker" | "python";
+
+const GRAPH_ECOSYSTEMS: { key: GraphEcosystem; label: string }[] = [
+  { key: "npm", label: "npm" },
+  { key: "docker", label: "docker" },
+  { key: "python", label: "python" },
+];
+
+function prEcosystemToGraph(eco: Ecosystem): GraphEcosystem | null {
+  if (eco === "npm") return "npm";
+  if (eco === "docker") return "docker";
+  if (eco === "pip") return "python";
+  return null;
+}
+
+function DependencyOverviewSection({ prList }: { prList: DependabotPr[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const [enabled, setEnabled] = useState(false);
+  const [enabledEcosystems, setEnabledEcosystems] = useState<Set<GraphEcosystem>>(
+    new Set(["npm", "docker", "python"]),
+  );
+  const [search, setSearch] = useState("");
+
+  const overview = useQuery({
+    queryKey: ["dependencies", "overview"],
+    queryFn: () => orpc.dependencies.overview(),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+
+  function toggleExpanded() {
+    setExpanded((prev) => {
+      const next = !prev;
+      if (next && !enabled) setEnabled(true);
+      return next;
+    });
+  }
+
+  function toggleEcosystem(key: GraphEcosystem) {
+    setEnabledEcosystems((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        if (next.size === 1) return next;
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
+  const repos = overview.data?.repos ?? [];
+  const totalDeps = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of repos) {
+      for (const d of r.dependencies) set.add(`${d.ecosystem}:${d.name.toLowerCase()}`);
+    }
+    return set.size;
+  }, [repos]);
+
+  const graphRepos: GraphInputRepo[] = useMemo(
+    () =>
+      repos.map((r) => ({
+        fullName: r.fullName,
+        dependencies: r.dependencies.map((d) => ({
+          name: d.name,
+          version: d.version,
+          ecosystem: d.ecosystem,
+        })),
+      })),
+    [repos],
+  );
+
+  const outdated: GraphOutdatedDep[] = useMemo(() => {
+    const map = new Map<string, GraphOutdatedDep>();
+    for (const pr of prList) {
+      const eco = prEcosystemToGraph(pr.ecosystem);
+      if (!eco || !pr.dependency) continue;
+      const key = `${eco}:${pr.dependency.toLowerCase()}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          ecosystem: eco,
+          name: pr.dependency,
+          fromVersion: pr.fromVersion,
+          toVersion: pr.toVersion,
+          prUrl: pr.htmlUrl,
+          updateType: pr.updateType,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [prList]);
+
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <button
+          type="button"
+          onClick={toggleExpanded}
+          className="flex w-full items-center justify-between gap-3 p-4 text-left transition-colors hover:bg-accent/30"
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+              <Network className="h-4 w-4" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold">Dependency overview</div>
+              <div className="text-xs text-muted-foreground">
+                Force-directed view of every package across your watched repos
+                {overview.data ? (
+                  <>
+                    {" • "}
+                    <span className="tabular-nums">{repos.length}</span> repos,{" "}
+                    <span className="tabular-nums">{totalDeps}</span> unique deps
+                  </>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 text-muted-foreground">
+            {overview.isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </div>
+        </button>
+
+        {expanded ? (
+          <div className="border-t">
+            <div className="flex flex-wrap items-center gap-2 p-4">
+              <div className="flex items-center gap-1.5">
+                {GRAPH_ECOSYSTEMS.map((eco) => {
+                  const active = enabledEcosystems.has(eco.key);
+                  return (
+                    <button
+                      key={eco.key}
+                      type="button"
+                      onClick={() => toggleEcosystem(eco.key)}
+                      className={cn(
+                        "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                        active
+                          ? "border-primary/40 bg-primary/10 text-foreground"
+                          : "border-border bg-background text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {eco.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="ml-2 flex-1" />
+
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Filter package or repo"
+                  className="h-8 w-56 rounded-md border bg-background pl-8 pr-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => overview.refetch()}
+                disabled={overview.isFetching || !enabled}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", overview.isFetching && "animate-spin")} />
+                Refresh
+              </Button>
+            </div>
+
+            <div className="border-t">
+              {overview.isLoading ? (
+                <EmptyState icon={Loader2} title="Scanning manifests" spinning />
+              ) : overview.isError ? (
+                <EmptyState
+                  icon={AlertCircle}
+                  title="Failed to scan"
+                  description={(overview.error as Error).message}
+                />
+              ) : repos.length === 0 ? (
+                <EmptyState
+                  icon={Package}
+                  title="Nothing to map"
+                  description="None of your watched repos contain a package.json, Dockerfile, pyproject.toml, or requirements.txt."
+                />
+              ) : (
+                <DependencyGraph
+                  repos={graphRepos}
+                  outdated={outdated}
+                  ecosystemFilter={enabledEcosystems}
+                  search={search}
+                  height={640}
+                />
+              )}
+            </div>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
 }
 
 function EmptyState({
