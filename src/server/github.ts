@@ -346,6 +346,167 @@ export async function listAccessibleRepos(token: string): Promise<RepoSummary[]>
   }
 }
 
+export type DependabotConfigFile = {
+  content: string;
+  sha: string;
+  path: ".github/dependabot.yml" | ".github/dependabot.yaml";
+};
+
+const CONFIG_PATHS = [".github/dependabot.yml", ".github/dependabot.yaml"] as const;
+
+function decodeBase64(value: string): string {
+  return Buffer.from(value, "base64").toString("utf8");
+}
+
+function encodeBase64(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64");
+}
+
+export async function getDependabotConfig(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<DependabotConfigFile | null> {
+  const octokit = octokitFor(token);
+  for (const path of CONFIG_PATHS) {
+    try {
+      const { data } = await octokit.rest.repos.getContent({ owner, repo, path });
+      if (Array.isArray(data) || data.type !== "file" || !("content" in data)) continue;
+      return {
+        content: decodeBase64(data.content.replace(/\n/g, "")),
+        sha: data.sha,
+        path,
+      };
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status === 404) continue;
+      throw mapGithubError(err, `read dependabot config for ${owner}/${repo}`);
+    }
+  }
+  return null;
+}
+
+export async function getDefaultBranch(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<{ name: string; sha: string }> {
+  const octokit = octokitFor(token);
+  try {
+    const { data: repository } = await octokit.rest.repos.get({ owner, repo });
+    const branchName = repository.default_branch;
+    const { data: ref } = await octokit.rest.git.getRef({
+      owner,
+      repo,
+      ref: `heads/${branchName}`,
+    });
+    return { name: branchName, sha: ref.object.sha };
+  } catch (err) {
+    throw mapGithubError(err, `read default branch for ${owner}/${repo}`);
+  }
+}
+
+export type ConfigSyncResult =
+  | { kind: "synced"; prNumber: number; prUrl: string; branchName: string }
+  | { kind: "pr_open"; prNumber: number; prUrl: string; branchName: string }
+  | { kind: "no_change" };
+
+const CONFIG_BRANCH_PREFIX = "dmo/sync-dependabot-config";
+
+export async function findOpenConfigSyncPr(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<{ prNumber: number; prUrl: string; branchName: string } | null> {
+  const octokit = octokitFor(token);
+  try {
+    const prs = await octokit.paginate(octokit.rest.pulls.list, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    for (const pr of prs) {
+      const branch = pr.head?.ref;
+      if (branch?.startsWith(CONFIG_BRANCH_PREFIX)) {
+        return { prNumber: pr.number, prUrl: pr.html_url, branchName: branch };
+      }
+    }
+    return null;
+  } catch (err) {
+    throw mapGithubError(err, `search existing config PR for ${owner}/${repo}`);
+  }
+}
+
+export async function createConfigSyncPr(
+  token: string,
+  owner: string,
+  repo: string,
+  options: {
+    desiredYaml: string;
+    commitMessage: string;
+    prTitle: string;
+    prBody: string;
+    runId: string;
+  },
+): Promise<ConfigSyncResult> {
+  const octokit = octokitFor(token);
+
+  const existing = await findOpenConfigSyncPr(token, owner, repo);
+  if (existing) return { kind: "pr_open", ...existing };
+
+  const current = await getDependabotConfig(token, owner, repo);
+  if (current && current.content === options.desiredYaml) {
+    return { kind: "no_change" };
+  }
+
+  const targetPath = current?.path ?? ".github/dependabot.yml";
+  const defaultBranch = await getDefaultBranch(token, owner, repo);
+  const branchName = `${CONFIG_BRANCH_PREFIX}-${options.runId.slice(0, 8)}`;
+
+  try {
+    await octokit.rest.git.createRef({
+      owner,
+      repo,
+      ref: `refs/heads/${branchName}`,
+      sha: defaultBranch.sha,
+    });
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status !== 422)
+      throw mapGithubError(err, `create branch ${branchName} on ${owner}/${repo}`);
+    // Branch already exists from a prior failed attempt. Reuse it.
+  }
+
+  try {
+    await octokit.rest.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path: targetPath,
+      message: options.commitMessage,
+      content: encodeBase64(options.desiredYaml),
+      branch: branchName,
+      sha: current?.sha,
+    });
+  } catch (err) {
+    throw mapGithubError(err, `commit ${targetPath} on ${owner}/${repo}@${branchName}`);
+  }
+
+  try {
+    const { data: pr } = await octokit.rest.pulls.create({
+      owner,
+      repo,
+      title: options.prTitle,
+      head: branchName,
+      base: defaultBranch.name,
+      body: options.prBody,
+    });
+    return { kind: "synced", prNumber: pr.number, prUrl: pr.html_url, branchName };
+  } catch (err) {
+    throw mapGithubError(err, `open PR on ${owner}/${repo} from ${branchName}`);
+  }
+}
+
 export type PrReadiness =
   | { kind: "ready" }
   | { kind: "computing" }

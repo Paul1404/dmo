@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Check,
   ExternalLink,
+  FileCode,
   GitBranch,
   GitMerge,
   Loader2,
@@ -268,6 +269,14 @@ function DashboardPage() {
             {user?.image ? (
               <img src={user.image} alt={user.name} className="h-9 w-9 rounded-full border" />
             ) : null}
+            <Link
+              to="/orchestrator"
+              className="inline-flex h-9 items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-accent"
+              title="Dependabot config orchestrator"
+            >
+              <FileCode className="h-4 w-4" />
+              <span className="hidden sm:inline">Config</span>
+            </Link>
             <Link
               to="/repos"
               className="inline-flex h-9 items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-accent"

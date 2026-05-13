@@ -99,3 +99,51 @@ export const mergeJobItems = pgTable(
   },
   (table) => [primaryKey({ columns: [table.jobId, table.prNumber] })],
 );
+
+export const dependabotTemplates = pgTable("dependabot_templates", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  yamlContent: text("yaml_content").notNull(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const orchestratorRuns = pgTable("orchestrator_runs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  status: text("status").notNull(),
+  totalCount: integer("total_count").notNull(),
+  syncedCount: integer("synced_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  error: text("error"),
+  templateSnapshot: text("template_snapshot").notNull(),
+  commitMessage: text("commit_message").notNull(),
+  prTitle: text("pr_title").notNull(),
+  prBody: text("pr_body").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+});
+
+export const orchestratorRunItems = pgTable(
+  "orchestrator_run_items",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => orchestratorRuns.id, { onDelete: "cascade" }),
+    repoOwner: text("repo_owner").notNull(),
+    repoName: text("repo_name").notNull(),
+    status: text("status").notNull(),
+    prNumber: integer("pr_number"),
+    prUrl: text("pr_url"),
+    branchName: text("branch_name"),
+    attempts: integer("attempts").notNull().default(0),
+    error: text("error"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.runId, table.repoOwner, table.repoName] })],
+);
