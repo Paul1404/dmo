@@ -16,6 +16,12 @@ import {
   listDependabotPrs,
 } from "~/server/github";
 import { cancelJob, enqueueJob, listActivePrKeysForUser, listJobsForUser } from "~/server/jobs";
+import {
+  assertAllowedUser,
+  assertCanEnqueueJob,
+  assertCanEnqueueRun,
+  assertRateLimit,
+} from "~/server/limits";
 import { log } from "~/server/logger";
 import {
   cancelOrchestratorRun,
@@ -31,6 +37,8 @@ const authed = base.use(async ({ context, next }) => {
   if (!context.user) {
     throw new ORPCError("UNAUTHORIZED", { message: "Sign in required" });
   }
+  assertRateLimit(context.user.id);
+  await assertAllowedUser(context.user.id);
   return next({ context: { ...context, user: context.user } });
 });
 
@@ -258,6 +266,7 @@ export const router = {
         }),
       )
       .handler(async ({ context, input }) => {
+        await assertCanEnqueueRun(context.user.id);
         const [template] = await db
           .select()
           .from(dependabotTemplates)
@@ -322,6 +331,7 @@ export const router = {
         }),
       )
       .handler(async ({ context, input }) => {
+        await assertCanEnqueueJob(context.user.id);
         const jobId = await enqueueJob({
           userId: context.user.id,
           repoOwner: input.repo.owner,
