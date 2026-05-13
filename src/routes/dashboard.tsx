@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
 import {
@@ -12,6 +12,7 @@ import {
   LogOut,
   Package,
   RefreshCw,
+  Settings,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -108,31 +109,32 @@ function DashboardPage() {
     staleTime: 60_000,
   });
 
+  const prList = prs.data?.prs ?? [];
+  const watchedCount = prs.data?.watchedCount ?? null;
+
   const filtered = useMemo(() => {
-    if (!prs.data) return [];
-    return prs.data.filter((p) => {
+    return prList.filter((p) => {
       if (repoFilter !== "all" && p.repoFullName !== repoFilter) return false;
       if (ecosystemFilter !== "all" && p.ecosystem !== ecosystemFilter) return false;
       if (updateTypeFilter !== "all" && p.updateType !== updateTypeFilter) return false;
       return true;
     });
-  }, [prs.data, repoFilter, ecosystemFilter, updateTypeFilter]);
+  }, [prList, repoFilter, ecosystemFilter, updateTypeFilter]);
 
   const repoOptions = useMemo(() => {
-    if (!prs.data) return [];
-    const set = new Set(prs.data.map((p) => p.repoFullName));
+    const set = new Set(prList.map((p) => p.repoFullName));
     return Array.from(set).sort();
-  }, [prs.data]);
+  }, [prList]);
 
   const allFilteredSelected = filtered.length > 0 && filtered.every((p) => selected.has(prKey(p)));
   const someSelected = filtered.some((p) => selected.has(prKey(p)));
 
   const stats = useMemo(() => {
     if (!prs.data) return null;
-    const ecosystems = new Set(prs.data.map((p) => p.ecosystem));
-    const repos = new Set(prs.data.map((p) => p.repoFullName));
-    return { total: prs.data.length, repos: repos.size, ecosystems: ecosystems.size };
-  }, [prs.data]);
+    const ecosystems = new Set(prList.map((p) => p.ecosystem));
+    const repos = new Set(prList.map((p) => p.repoFullName));
+    return { total: prList.length, repos: repos.size, ecosystems: ecosystems.size };
+  }, [prs.data, prList]);
 
   function toggleAll() {
     if (allFilteredSelected) {
@@ -154,9 +156,8 @@ function DashboardPage() {
   }
 
   const selectedPrs = useMemo(() => {
-    if (!prs.data) return [] as DependabotPr[];
-    return prs.data.filter((p) => selected.has(prKey(p)));
-  }, [prs.data, selected]);
+    return prList.filter((p) => selected.has(prKey(p)));
+  }, [prList, selected]);
 
   const mergeMutation = useMutation({
     mutationFn: async () => {
@@ -218,6 +219,19 @@ function DashboardPage() {
             {user?.image ? (
               <img src={user.image} alt={user.name} className="h-9 w-9 rounded-full border" />
             ) : null}
+            <Link
+              to="/repos"
+              className="inline-flex h-9 items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-accent"
+              title="Manage watched repositories"
+            >
+              <Settings className="h-4 w-4" />
+              <span className="hidden sm:inline">Repos</span>
+              {watchedCount != null ? (
+                <Badge variant="outline" className="ml-1 px-1.5 text-xs">
+                  {watchedCount}
+                </Badge>
+              ) : null}
+            </Link>
             <Button variant="outline" size="icon" onClick={handleSignOut} title="Sign out">
               <LogOut className="h-4 w-4" />
             </Button>
@@ -373,13 +387,28 @@ function DashboardPage() {
                 title="Failed to load"
                 description={(prs.error as Error).message}
               />
+            ) : watchedCount === 0 ? (
+              <EmptyState
+                icon={Settings}
+                title="Pick repositories to watch"
+                description="DMO only checks repos you opt into. Choose which ones to monitor for Dependabot PRs."
+                action={
+                  <Link
+                    to="/repos"
+                    className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    <Settings className="h-4 w-4" />
+                    Choose repositories
+                  </Link>
+                }
+              />
             ) : filtered.length === 0 ? (
               <EmptyState
                 icon={Check}
                 title="Nothing to merge"
                 description={
-                  prs.data && prs.data.length === 0
-                    ? "No open Dependabot PRs in your repositories."
+                  prList.length === 0
+                    ? "No open Dependabot PRs in your watched repositories."
                     : "No PRs match the current filters."
                 }
               />
@@ -553,11 +582,13 @@ function EmptyState({
   title,
   description,
   spinning,
+  action,
 }: {
   icon: typeof Check;
   title: string;
   description?: string;
   spinning?: boolean;
+  action?: React.ReactNode;
 }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
@@ -566,6 +597,7 @@ function EmptyState({
       </div>
       <div className="text-base font-medium">{title}</div>
       {description ? <p className="max-w-md text-sm text-muted-foreground">{description}</p> : null}
+      {action ? <div className="mt-2">{action}</div> : null}
     </div>
   );
 }

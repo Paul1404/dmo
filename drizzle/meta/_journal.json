@@ -8,6 +8,13 @@
       "when": 1778704381251,
       "tag": "0000_huge_micromax",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1778708122340,
+      "tag": "0001_curvy_pestilence",
+      "breakpoints": true
     }
   ]
 }

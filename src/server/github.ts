@@ -177,66 +177,100 @@ export function invalidateDependabotCache(userId: string): void {
   dependabotCache.delete(userId);
 }
 
-export async function listDependabotPrs(userId: string, token: string): Promise<DependabotPr[]> {
+const DEPENDABOT_LOGIN = "dependabot[bot]";
+
+export type WatchedRepoRef = { owner: string; name: string };
+
+async function fetchDependabotPrsFromRepo(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+): Promise<DependabotPr[]> {
+  const repoFullName = `${owner}/${repo}`;
+  const all = await octokit.paginate(octokit.rest.pulls.list, {
+    owner,
+    repo,
+    state: "open",
+    per_page: 100,
+    sort: "created",
+    direction: "desc",
+  });
+  const out: DependabotPr[] = [];
+  for (const pr of all) {
+    if (pr.user?.login !== DEPENDABOT_LOGIN) continue;
+    const labels = pr.labels
+      .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
+      .filter(Boolean);
+    const parsed = parseTitle(pr.title);
+    out.push({
+      id: pr.id,
+      nodeId: pr.node_id,
+      number: pr.number,
+      title: pr.title,
+      htmlUrl: pr.html_url,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      repoFullName,
+      repoOwner: owner,
+      repoName: repo,
+      ecosystem: detectEcosystem(labels),
+      updateType: classifyUpdate(parsed.from, parsed.to),
+      dependency: parsed.dependency,
+      fromVersion: parsed.from,
+      toVersion: parsed.to,
+      draft: Boolean(pr.draft),
+      labels,
+    });
+  }
+  return out;
+}
+
+export async function listDependabotPrs(
+  userId: string,
+  token: string,
+  repos: WatchedRepoRef[],
+): Promise<DependabotPr[]> {
   const now = Date.now();
   const cached = dependabotCache.get(userId);
   if (cached && cached.expiresAt > now) return cached.data;
 
-  const octokit = octokitFor(token);
-  const query = "is:pr is:open author:app/dependabot archived:false";
-
-  const results: DependabotPr[] = [];
-  let page = 1;
-  const perPage = 100;
-  while (true) {
-    let data: Awaited<ReturnType<typeof octokit.rest.search.issuesAndPullRequests>>["data"];
-    try {
-      ({ data } = await octokit.rest.search.issuesAndPullRequests({
-        q: query,
-        per_page: perPage,
-        page,
-        advanced_search: "true",
-      }));
-    } catch (err) {
-      throw mapGithubError(err, "search dependabot pull requests");
-    }
-
-    for (const item of data.items) {
-      // repository_url is like https://api.github.com/repos/owner/repo
-      const repoFullName = item.repository_url.replace("https://api.github.com/repos/", "");
-      const [owner = "", name = ""] = repoFullName.split("/");
-      const labels = item.labels
-        .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
-        .filter(Boolean);
-      const parsed = parseTitle(item.title);
-      results.push({
-        id: item.id,
-        nodeId: item.node_id,
-        number: item.number,
-        title: item.title,
-        htmlUrl: item.html_url,
-        createdAt: item.created_at,
-        updatedAt: item.updated_at,
-        repoFullName,
-        repoOwner: owner,
-        repoName: name,
-        ecosystem: detectEcosystem(labels),
-        updateType: classifyUpdate(parsed.from, parsed.to),
-        dependency: parsed.dependency,
-        fromVersion: parsed.from,
-        toVersion: parsed.to,
-        draft: Boolean(item.draft),
-        labels,
-      });
-    }
-
-    if (data.items.length < perPage) break;
-    if (results.length >= data.total_count) break;
-    page += 1;
-    if (page > 10) break; // hard cap, 1000 PRs
-    // Pacing delay to stay under GitHub search secondary rate limits.
-    await new Promise((r) => setTimeout(r, 1500));
+  if (repos.length === 0) {
+    dependabotCache.set(userId, { data: [], expiresAt: now + DEPENDABOT_CACHE_TTL_MS });
+    return [];
   }
+
+  const octokit = octokitFor(token);
+  const results: DependabotPr[] = [];
+  const concurrency = Math.min(6, repos.length);
+  let cursor = 0;
+  let fatal: Error | null = null;
+
+  async function worker() {
+    while (cursor < repos.length && !fatal) {
+      const i = cursor++;
+      const repo = repos[i];
+      if (!repo) continue;
+      try {
+        const prs = await fetchDependabotPrsFromRepo(octokit, repo.owner, repo.name);
+        results.push(...prs);
+      } catch (err) {
+        const mapped = mapGithubError(err, `list PRs for ${repo.owner}/${repo.name}`);
+        if (mapped instanceof GithubRateLimitError) {
+          fatal = mapped;
+          return;
+        }
+        log.warn("dependabot fetch failed for repo", {
+          repo: `${repo.owner}/${repo.name}`,
+          message: mapped.message,
+        });
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  if (fatal) throw fatal;
+
+  results.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   dependabotCache.set(userId, { data: results, expiresAt: Date.now() + DEPENDABOT_CACHE_TTL_MS });
   return results;
 }

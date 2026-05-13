@@ -1,5 +1,8 @@
 import { ORPCError, os } from "@orpc/server";
+import { eq } from "drizzle-orm";
 import * as v from "valibot";
+import { db } from "~/server/db";
+import { watchedRepos } from "~/server/db/schema";
 import {
   approveAndMergePr,
   GithubAuthError,
@@ -59,6 +62,19 @@ const PrRef = v.object({
   number: v.pipe(v.number(), v.integer(), v.minValue(1)),
 });
 
+const RepoRef = v.object({
+  owner: v.pipe(v.string(), v.minLength(1), v.maxLength(100)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(100)),
+});
+
+async function getWatchedRepos(userId: string): Promise<{ owner: string; name: string }[]> {
+  const rows = await db
+    .select({ owner: watchedRepos.repoOwner, name: watchedRepos.repoName })
+    .from(watchedRepos)
+    .where(eq(watchedRepos.userId, userId));
+  return rows;
+}
+
 export const router = {
   me: authed.handler(async ({ context }) => context.user),
 
@@ -67,12 +83,41 @@ export const router = {
       const token = await getGithubTokenForUser(context.user.id);
       return listAccessibleRepos(token);
     }),
+
+    getWatched: authed.handler(async ({ context }) => {
+      return getWatchedRepos(context.user.id);
+    }),
+
+    setWatched: authed
+      .input(v.object({ repos: v.pipe(v.array(RepoRef), v.maxLength(500)) }))
+      .handler(async ({ context, input }) => {
+        const userId = context.user.id;
+        await db.transaction(async (tx) => {
+          await tx.delete(watchedRepos).where(eq(watchedRepos.userId, userId));
+          if (input.repos.length > 0) {
+            await tx
+              .insert(watchedRepos)
+              .values(
+                input.repos.map((r) => ({
+                  userId,
+                  repoOwner: r.owner,
+                  repoName: r.name,
+                })),
+              )
+              .onConflictDoNothing();
+          }
+        });
+        invalidateDependabotCache(userId);
+        return { count: input.repos.length };
+      }),
   },
 
   dependabot: {
     list: githubGuard.handler(async ({ context }) => {
+      const watched = await getWatchedRepos(context.user.id);
       const token = await getGithubTokenForUser(context.user.id);
-      return listDependabotPrs(context.user.id, token);
+      const prs = await listDependabotPrs(context.user.id, token, watched);
+      return { prs, watchedCount: watched.length };
     }),
 
     approveAndMerge: githubGuard
