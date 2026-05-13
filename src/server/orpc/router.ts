@@ -4,6 +4,7 @@ import * as v from "valibot";
 import { parse as parseYaml } from "yaml";
 import { db } from "~/server/db";
 import { dependabotTemplates, watchedRepos } from "~/server/db/schema";
+import { listDependenciesOverview } from "~/server/dependencies";
 import {
   type DependabotConfigFile,
   GithubAuthError,
@@ -134,6 +135,17 @@ export const router = {
         watchedCount: watched.length,
         activeKeys: Array.from(activeKeys),
       };
+    }),
+  },
+
+  dependencies: {
+    overview: githubGuard.handler(async ({ context }) => {
+      const watched = await getWatchedRepos(context.user.id);
+      if (watched.length === 0) {
+        return { repos: [], scannedAt: new Date().toISOString() };
+      }
+      const token = await getGithubTokenForUser(context.user.id);
+      return listDependenciesOverview(context.user.id, token, watched);
     }),
   },
 
