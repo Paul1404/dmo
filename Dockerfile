@@ -20,5 +20,6 @@ ENV NODE_ENV=production
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/server.ts ./server.ts
 EXPOSE 3000
-CMD ["bun", "run", "dist/server/server.js"]
+CMD ["bun", "run", "server.ts"]
