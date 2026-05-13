@@ -346,14 +346,45 @@ export async function listAccessibleRepos(token: string): Promise<RepoSummary[]>
   }
 }
 
-export type PrActionResult = {
-  repoFullName: string;
-  number: number;
-  ok: boolean;
-  approved: boolean;
-  merged: boolean;
-  error?: string;
-};
+export type PrReadiness =
+  | { kind: "ready" }
+  | { kind: "computing" }
+  | { kind: "conflict" }
+  | { kind: "blocked"; reason: string }
+  | { kind: "closed"; merged: boolean }
+  | { kind: "draft" };
+
+export async function probePrReadiness(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+): Promise<PrReadiness> {
+  const octokit = octokitFor(token);
+  try {
+    const { data: pr } = await octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: pullNumber,
+    });
+    if (pr.state === "closed") return { kind: "closed", merged: Boolean(pr.merged) };
+    if (pr.draft) return { kind: "draft" };
+    if (pr.mergeable == null) return { kind: "computing" };
+    const state = pr.mergeable_state;
+    if (state === "dirty") return { kind: "conflict" };
+    if (state === "behind") return { kind: "conflict" };
+    if (state === "blocked") return { kind: "blocked", reason: "blocked by branch protection" };
+    if (!pr.mergeable) return { kind: "conflict" };
+    return { kind: "ready" };
+  } catch (err) {
+    throw mapGithubError(err, `probe PR ${owner}/${repo}#${pullNumber}`);
+  }
+}
+
+export type MergeOutcome =
+  | { kind: "merged" }
+  | { kind: "not_mergeable" }
+  | { kind: "blocked"; reason: string };
 
 export async function approveAndMergePr(
   token: string,
@@ -361,41 +392,39 @@ export async function approveAndMergePr(
   repo: string,
   pullNumber: number,
   mergeMethod: "merge" | "squash" | "rebase" = "squash",
-): Promise<PrActionResult> {
+): Promise<MergeOutcome> {
   const octokit = octokitFor(token);
-  const result: PrActionResult = {
-    repoFullName: `${owner}/${repo}`,
-    number: pullNumber,
-    ok: false,
-    approved: false,
-    merged: false,
-  };
 
   try {
-    try {
-      await octokit.rest.pulls.createReview({
-        owner,
-        repo,
-        pull_number: pullNumber,
-        event: "APPROVE",
-      });
-      result.approved = true;
-    } catch (err) {
-      // GitHub rejects self-approval with HTTP 422. Continue to merge if so.
-      const status = (err as { status?: number }).status;
-      if (status !== 422) throw err;
-    }
+    await octokit.rest.pulls.createReview({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      event: "APPROVE",
+    });
+  } catch (err) {
+    // GitHub rejects self-approval with HTTP 422. Proceed to merge anyway.
+    const status = (err as { status?: number }).status;
+    if (status !== 422) throw mapGithubError(err, `approve PR ${owner}/${repo}#${pullNumber}`);
+  }
 
+  try {
     await octokit.rest.pulls.merge({
       owner,
       repo,
       pull_number: pullNumber,
       merge_method: mergeMethod,
     });
-    result.merged = true;
-    result.ok = true;
+    return { kind: "merged" };
   } catch (err) {
-    result.error = err instanceof Error ? err.message : String(err);
+    const status = (err as { status?: number }).status;
+    // 405: PR not currently mergeable (conflicts, behind, branch protection).
+    // 409: SHA mismatch (someone else updated). Both are transient: try again later.
+    if (status === 405 || status === 409) return { kind: "not_mergeable" };
+    if (status === 403) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { kind: "blocked", reason: message };
+    }
+    throw mapGithubError(err, `merge PR ${owner}/${repo}#${pullNumber}`);
   }
-  return result;
 }

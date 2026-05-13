@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import handler from "./dist/server/server.js";
+import { startWorker, stopWorker } from "./src/server/jobs.ts";
 import { log } from "./src/server/logger.ts";
 
 const clientDir = resolve(import.meta.dir, "dist/client");
@@ -51,10 +52,12 @@ Bun.serve({
 });
 
 log.info("server listening", { port });
+startWorker();
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     log.info("shutdown signal received", { signal });
+    stopWorker();
     process.exit(0);
   });
 }

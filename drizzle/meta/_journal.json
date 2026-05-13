@@ -15,6 +15,13 @@
       "when": 1778708122340,
       "tag": "0001_curvy_pestilence",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778709739103,
+      "tag": "0002_merge_jobs",
+      "breakpoints": true
     }
   ]
 }
