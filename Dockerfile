@@ -21,5 +21,7 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/server.ts ./server.ts
+COPY --from=build /app/drizzle ./drizzle
+COPY --from=build /app/src/server/db/migrate.ts ./src/server/db/migrate.ts
 EXPOSE 3000
 CMD ["bun", "run", "server.ts"]

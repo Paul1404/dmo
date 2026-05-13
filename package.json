@@ -12,6 +12,7 @@
     "format": "biome format --write .",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:prod": "bun src/server/db/migrate.ts",
     "db:push": "drizzle-kit push",
     "auth:generate": "better-auth generate --output src/server/db/auth-schema.ts",
     "test": "vitest run"
