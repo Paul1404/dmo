@@ -4,7 +4,6 @@ import * as v from "valibot";
 import { db } from "~/server/db";
 import { watchedRepos } from "~/server/db/schema";
 import {
-  approveAndMergePr,
   GithubAuthError,
   GithubRateLimitError,
   getGithubTokenForUser,
@@ -12,6 +11,7 @@ import {
   listAccessibleRepos,
   listDependabotPrs,
 } from "~/server/github";
+import { cancelJob, enqueueJob, listActivePrKeysForUser, listJobsForUser } from "~/server/jobs";
 import { log } from "~/server/logger";
 import type { RpcContext } from "./context";
 
@@ -56,10 +56,10 @@ const githubGuard = authed.use(async ({ context, next, path }) => {
 
 const MergeMethod = v.picklist(["merge", "squash", "rebase"]);
 
-const PrRef = v.object({
-  owner: v.pipe(v.string(), v.minLength(1)),
-  repo: v.pipe(v.string(), v.minLength(1)),
+const EnqueuePr = v.object({
   number: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  title: v.pipe(v.string(), v.maxLength(500)),
+  htmlUrl: v.pipe(v.string(), v.maxLength(500)),
 });
 
 const RepoRef = v.object({
@@ -116,31 +116,48 @@ export const router = {
     list: githubGuard.handler(async ({ context }) => {
       const watched = await getWatchedRepos(context.user.id);
       const token = await getGithubTokenForUser(context.user.id);
-      const prs = await listDependabotPrs(context.user.id, token, watched);
-      return { prs, watchedCount: watched.length };
+      const [prs, activeKeys] = await Promise.all([
+        listDependabotPrs(context.user.id, token, watched),
+        listActivePrKeysForUser(context.user.id),
+      ]);
+      return {
+        prs,
+        watchedCount: watched.length,
+        activeKeys: Array.from(activeKeys),
+      };
+    }),
+  },
+
+  jobs: {
+    list: authed.handler(async ({ context }) => {
+      return listJobsForUser(context.user.id);
     }),
 
-    approveAndMerge: githubGuard
+    enqueue: authed
       .input(
         v.object({
-          prs: v.pipe(v.array(PrRef), v.minLength(1), v.maxLength(100)),
+          repo: RepoRef,
+          prs: v.pipe(v.array(EnqueuePr), v.minLength(1), v.maxLength(100)),
           mergeMethod: v.optional(MergeMethod, "squash"),
         }),
       )
       .handler(async ({ context, input }) => {
-        const token = await getGithubTokenForUser(context.user.id);
-        const results = [];
-        for (const pr of input.prs) {
-          const r = await approveAndMergePr(token, pr.owner, pr.repo, pr.number, input.mergeMethod);
-          results.push(r);
-        }
-        invalidateDependabotCache(context.user.id);
-        return {
-          total: results.length,
-          merged: results.filter((r) => r.merged).length,
-          failed: results.filter((r) => !r.ok).length,
-          results,
-        };
+        const jobId = await enqueueJob({
+          userId: context.user.id,
+          repoOwner: input.repo.owner,
+          repoName: input.repo.name,
+          mergeMethod: input.mergeMethod,
+          prs: input.prs,
+        });
+        return { jobId };
+      }),
+
+    cancel: authed
+      .input(v.object({ jobId: v.pipe(v.string(), v.minLength(1)) }))
+      .handler(async ({ context, input }) => {
+        const ok = await cancelJob(context.user.id, input.jobId);
+        if (!ok) throw new ORPCError("NOT_FOUND", { message: "Job not found or already done" });
+        return { ok: true };
       }),
   },
 };

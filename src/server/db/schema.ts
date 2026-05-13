@@ -1,4 +1,4 @@
-import { boolean, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, integer, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -61,4 +61,41 @@ export const watchedRepos = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.userId, table.repoOwner, table.repoName] })],
+);
+
+export const mergeJobs = pgTable("merge_jobs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  repoOwner: text("repo_owner").notNull(),
+  repoName: text("repo_name").notNull(),
+  mergeMethod: text("merge_method").notNull(),
+  status: text("status").notNull(),
+  totalCount: integer("total_count").notNull(),
+  mergedCount: integer("merged_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  error: text("error"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+});
+
+export const mergeJobItems = pgTable(
+  "merge_job_items",
+  {
+    jobId: text("job_id")
+      .notNull()
+      .references(() => mergeJobs.id, { onDelete: "cascade" }),
+    prNumber: integer("pr_number").notNull(),
+    title: text("title").notNull(),
+    htmlUrl: text("html_url").notNull(),
+    status: text("status").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    error: text("error"),
+    waitingSince: timestamp("waiting_since"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.jobId, table.prNumber] })],
 );

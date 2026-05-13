@@ -13,6 +13,7 @@ import {
   Package,
   RefreshCw,
   Settings,
+  X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -33,6 +34,7 @@ import { orpc } from "~/lib/orpc";
 import { cn } from "~/lib/utils";
 import { auth } from "~/server/auth";
 import type { DependabotPr, Ecosystem, UpdateType } from "~/server/github";
+import type { JobStatus, JobView } from "~/server/jobs";
 
 const requireUser = createServerFn({ method: "GET" }).handler(async () => {
   const request = getRequest();
@@ -106,10 +108,27 @@ function DashboardPage() {
     queryKey: ["dependabot", "list"],
     queryFn: () => orpc.dependabot.list(),
     retry: false,
-    staleTime: 60_000,
+    staleTime: 30_000,
   });
 
-  const prList = prs.data?.prs ?? [];
+  const jobs = useQuery({
+    queryKey: ["jobs", "list"],
+    queryFn: () => orpc.jobs.list(),
+    retry: false,
+    refetchInterval: (q) => {
+      const data = q.state.data as JobView[] | undefined;
+      if (!data) return 10_000;
+      const hasActive = data.some((j) => j.status === "queued" || j.status === "running");
+      return hasActive ? 5_000 : 30_000;
+    },
+  });
+
+  const activeKeys = useMemo(() => new Set(prs.data?.activeKeys ?? []), [prs.data?.activeKeys]);
+  const fullPrList = prs.data?.prs ?? [];
+  const prList = useMemo(
+    () => fullPrList.filter((p) => !activeKeys.has(prKey(p))),
+    [fullPrList, activeKeys],
+  );
   const watchedCount = prs.data?.watchedCount ?? null;
 
   const filtered = useMemo(() => {
@@ -159,37 +178,67 @@ function DashboardPage() {
     return prList.filter((p) => selected.has(prKey(p)));
   }, [prList, selected]);
 
-  const mergeMutation = useMutation({
+  const enqueueMutation = useMutation({
     mutationFn: async () => {
       if (selectedPrs.length === 0) throw new Error("Nothing selected");
-      return orpc.dependabot.approveAndMerge({
-        prs: selectedPrs.map((p) => ({
-          owner: p.repoOwner,
-          repo: p.repoName,
-          number: p.number,
-        })),
-        mergeMethod,
-      });
+      const byRepo = new Map<string, DependabotPr[]>();
+      for (const p of selectedPrs) {
+        const key = p.repoFullName;
+        const arr = byRepo.get(key) ?? [];
+        arr.push(p);
+        byRepo.set(key, arr);
+      }
+      const results = await Promise.allSettled(
+        Array.from(byRepo.values()).map((prsInRepo) => {
+          const first = prsInRepo[0];
+          if (!first) throw new Error("empty repo group");
+          return orpc.jobs.enqueue({
+            repo: { owner: first.repoOwner, name: first.repoName },
+            prs: prsInRepo.map((p) => ({
+              number: p.number,
+              title: p.title,
+              htmlUrl: p.htmlUrl,
+            })),
+            mergeMethod,
+          });
+        }),
+      );
+      const queued = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - queued;
+      return { queued, failed, repos: byRepo.size };
     },
     onSuccess: (data) => {
       if (data.failed > 0) {
-        toast.warning(`Merged ${data.merged}/${data.total}, ${data.failed} failed`, {
-          description: data.results
-            .filter((r) => !r.ok)
-            .slice(0, 3)
-            .map((r) => `${r.repoFullName}#${r.number}: ${r.error}`)
-            .join("\n"),
-        });
+        toast.warning(`Queued ${data.queued}/${data.repos} repos, ${data.failed} failed to queue`);
       } else {
-        toast.success(`Merged ${data.merged} pull requests`);
+        toast.success(`Queued ${data.queued} repo${data.queued === 1 ? "" : "s"}`);
       }
       setSelected(new Set());
       queryClient.invalidateQueries({ queryKey: ["dependabot", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["jobs", "list"] });
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Merge failed");
+      toast.error(err instanceof Error ? err.message : "Queue failed");
     },
   });
+
+  const cancelMutation = useMutation({
+    mutationFn: (jobId: string) => orpc.jobs.cancel({ jobId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["jobs", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["dependabot", "list"] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Cancel failed");
+    },
+  });
+
+  const activeJobs = (jobs.data ?? []).filter(
+    (j) => j.status === "queued" || j.status === "running",
+  );
+  const recentDoneJobs = (jobs.data ?? [])
+    .filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled")
+    .slice(-3);
 
   async function handleSignOut() {
     await authClient.signOut();
@@ -240,6 +289,15 @@ function DashboardPage() {
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-8 space-y-6">
+        {activeJobs.length > 0 || recentDoneJobs.length > 0 ? (
+          <JobsStrip
+            active={activeJobs}
+            recent={recentDoneJobs}
+            onCancel={(jobId) => cancelMutation.mutate(jobId)}
+            cancelling={cancelMutation.isPending ? cancelMutation.variables : null}
+          />
+        ) : null}
+
         <div className="grid gap-4 sm:grid-cols-3">
           <StatCard
             icon={GitBranch}
@@ -362,15 +420,15 @@ function DashboardPage() {
                   </SelectContent>
                 </Select>
                 <Button
-                  onClick={() => mergeMutation.mutate()}
-                  disabled={selectedPrs.length === 0 || mergeMutation.isPending}
+                  onClick={() => enqueueMutation.mutate()}
+                  disabled={selectedPrs.length === 0 || enqueueMutation.isPending}
                 >
-                  {mergeMutation.isPending ? (
+                  {enqueueMutation.isPending ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <GitMerge className="h-4 w-4" />
                   )}
-                  Approve and merge {selectedPrs.length || ""}
+                  Queue merge {selectedPrs.length || ""}
                 </Button>
               </div>
             </div>
@@ -574,6 +632,147 @@ function UpdateBadge({ type }: { type: UpdateType }) {
     unknown: { variant: "outline", label: "unknown" },
   };
   const { variant, label } = map[type];
+  return <Badge variant={variant}>{label}</Badge>;
+}
+
+function JobsStrip({
+  active,
+  recent,
+  onCancel,
+  cancelling,
+}: {
+  active: JobView[];
+  recent: JobView[];
+  onCancel: (jobId: string) => void;
+  cancelling: string | null | undefined;
+}) {
+  const shown = [...active, ...recent];
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <GitMerge className="h-3.5 w-3.5" />
+          Merge queue
+          {active.length > 0 ? (
+            <Badge variant="info" className="ml-1">
+              {active.length} active
+            </Badge>
+          ) : null}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {shown.map((job) => (
+            <JobCard
+              key={job.id}
+              job={job}
+              onCancel={onCancel}
+              cancelling={cancelling === job.id}
+            />
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function JobCard({
+  job,
+  onCancel,
+  cancelling,
+}: {
+  job: JobView;
+  onCancel: (jobId: string) => void;
+  cancelling: boolean;
+}) {
+  const active = job.status === "queued" || job.status === "running";
+  const done = job.mergedCount + job.failedCount + skippedCount(job);
+  const remaining = Math.max(0, job.totalCount - done);
+  const pct = job.totalCount === 0 ? 0 : Math.round((done / job.totalCount) * 100);
+  const currentItem = active
+    ? (job.items.find((i) => i.status === "merging" || i.status === "waiting_rebase") ?? null)
+    : null;
+
+  return (
+    <div className={cn("rounded-md border p-3 text-sm", jobBorderClass(job.status))}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-medium">{job.repoFullName}</div>
+          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+            <JobStatusBadge status={job.status} />
+            <span className="tabular-nums">
+              {job.mergedCount}/{job.totalCount} merged
+              {job.failedCount > 0 ? `, ${job.failedCount} failed` : null}
+            </span>
+          </div>
+        </div>
+        {active ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onCancel(job.id)}
+            disabled={cancelling}
+            title="Cancel job"
+            className="h-7 w-7 shrink-0"
+          >
+            {cancelling ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <X className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        ) : null}
+      </div>
+
+      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+        <div
+          className={cn(
+            "h-full transition-all",
+            job.status === "failed" ? "bg-destructive" : "bg-primary",
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      {currentItem ? (
+        <div className="mt-2 truncate text-xs text-muted-foreground">
+          {currentItem.status === "merging" ? "Merging" : "Waiting for rebase"}: #
+          {currentItem.prNumber} {currentItem.title}
+        </div>
+      ) : active && remaining > 0 ? (
+        <div className="mt-2 text-xs text-muted-foreground">{remaining} queued</div>
+      ) : null}
+
+      {job.error ? (
+        <div className="mt-2 truncate text-xs text-destructive" title={job.error}>
+          {job.error}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function skippedCount(job: JobView): number {
+  return job.items.reduce((n, i) => n + (i.status === "skipped" ? 1 : 0), 0);
+}
+
+function jobBorderClass(status: JobStatus): string {
+  if (status === "running" || status === "queued") return "border-primary/30 bg-primary/[0.04]";
+  if (status === "completed") return "border-emerald-600/30 bg-emerald-600/[0.04]";
+  if (status === "failed") return "border-destructive/40 bg-destructive/[0.04]";
+  return "border-border";
+}
+
+function JobStatusBadge({ status }: { status: JobStatus }) {
+  const map: Record<
+    JobStatus,
+    { variant: "success" | "info" | "warning" | "outline"; label: string }
+  > = {
+    queued: { variant: "info", label: "queued" },
+    running: { variant: "info", label: "running" },
+    completed: { variant: "success", label: "done" },
+    failed: { variant: "warning", label: "failed" },
+    cancelled: { variant: "outline", label: "cancelled" },
+  };
+  const { variant, label } = map[status];
   return <Badge variant={variant}>{label}</Badge>;
 }
 
