@@ -222,6 +222,7 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
   const nodesRef = useRef<Node[]>([]);
   const [, setTick] = useState(0);
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [viewBox, setViewBox] = useState({
     x: -containerWidth / 2,
@@ -230,7 +231,9 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
     h: height,
   });
   const panRef = useRef<{ startX: number; startY: number; vx: number; vy: number } | null>(null);
+  const panMovedRef = useRef(false);
   const dragOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
+  const nodeClickStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
 
   useEffect(() => {
     setViewBox((vb) => ({ ...vb, w: containerWidth, x: -containerWidth / 2 }));
@@ -243,6 +246,7 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
   useEffect(() => {
     nodesRef.current = initialNodes.map((n) => ({ ...n }));
     setHoverId(null);
+    setFocusId(null);
     setDragId(null);
     let raf = 0;
     let iter = 0;
@@ -349,12 +353,33 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
     return map;
   }, [edges, nodes]);
 
+  const activeId = focusId ?? hoverId;
+
   const highlightedIds = useMemo(() => {
-    if (!hoverId) return null;
-    const set = new Set<string>([hoverId]);
-    for (const id of adjacency.get(hoverId) ?? []) set.add(id);
+    if (!activeId) return null;
+    const set = new Set<string>([activeId]);
+    for (const id of adjacency.get(activeId) ?? []) set.add(id);
     return set;
-  }, [hoverId, adjacency]);
+  }, [activeId, adjacency]);
+
+  const topHubIds = useMemo(() => {
+    const sorted = initialNodes.filter((n) => n.kind === "dep").sort((a, b) => b.usage - a.usage);
+    return new Set(sorted.slice(0, 5).map((n) => n.id));
+  }, [initialNodes]);
+
+  const repoHealth = useMemo(() => {
+    const map = new Map<string, { total: number; outdated: number }>();
+    for (const e of edges) {
+      const repo = initialNodes[e.source];
+      const dep = initialNodes[e.target];
+      if (!repo || !dep || repo.kind !== "repo") continue;
+      const entry = map.get(repo.id) ?? { total: 0, outdated: 0 };
+      entry.total++;
+      if (dep.outdated) entry.outdated++;
+      map.set(repo.id, entry);
+    }
+    return map;
+  }, [edges, initialNodes]);
 
   function svgPointFromEvent(e: { clientX: number; clientY: number }): { x: number; y: number } {
     const el = containerRef.current?.querySelector("svg");
@@ -382,6 +407,7 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
     if (dragId) return;
     const pt = svgPointFromEvent(e);
     panRef.current = { startX: pt.x, startY: pt.y, vx: viewBox.x, vy: viewBox.y };
+    panMovedRef.current = false;
   }
 
   function onSvgMouseMove(e: React.MouseEvent<SVGSVGElement>) {
@@ -399,10 +425,15 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
       return;
     }
     if (panRef.current) {
+      const dx = pt.x - panRef.current.startX;
+      const dy = pt.y - panRef.current.startY;
+      if (!panMovedRef.current && dx * dx + dy * dy > 9) {
+        panMovedRef.current = true;
+      }
       setViewBox((vb) => ({
         ...vb,
-        x: panRef.current!.vx - (pt.x - panRef.current!.startX),
-        y: panRef.current!.vy - (pt.y - panRef.current!.startY),
+        x: panRef.current!.vx - dx,
+        y: panRef.current!.vy - dy,
       }));
     }
   }
@@ -410,17 +441,30 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
   function onSvgMouseUp() {
     if (dragId) {
       const n = nodes.find((x) => x.id === dragId);
+      const start = nodeClickStartRef.current;
+      if (n && start && start.id === n.id) {
+        const dx = n.x - start.x;
+        const dy = n.y - start.y;
+        if (dx * dx + dy * dy < 9) {
+          setFocusId((prev) => (prev === n.id ? null : n.id));
+        }
+      }
       if (n) n.pinned = false;
       setDragId(null);
       dragOffsetRef.current = null;
+      nodeClickStartRef.current = null;
+    } else if (panRef.current && !panMovedRef.current) {
+      setFocusId(null);
     }
     panRef.current = null;
+    panMovedRef.current = false;
   }
 
   function onNodeMouseDown(e: React.MouseEvent<SVGElement>, n: Node) {
     e.stopPropagation();
     const pt = svgPointFromEvent(e);
     dragOffsetRef.current = { dx: pt.x - n.x, dy: pt.y - n.y };
+    nodeClickStartRef.current = { id: n.id, x: n.x, y: n.y };
     n.pinned = true;
     setDragId(n.id);
   }
@@ -444,7 +488,8 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
     return { depNodes, repoNodes, outdatedNodes, edges: edges.length };
   }, [initialNodes, edges]);
 
-  const hoveredNode = hoverId ? (nodes.find((n) => n.id === hoverId) ?? null) : null;
+  const activeNode = activeId ? (nodes.find((n) => n.id === activeId) ?? null) : null;
+  const activeHealth = activeNode?.kind === "repo" ? (repoHealth.get(activeNode.id) ?? null) : null;
 
   return (
     <div ref={containerRef} className="relative w-full">
@@ -524,6 +569,9 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
             if (!a || !b) return null;
             const highlighted = highlightedIds?.has(a.id) && highlightedIds.has(b.id);
             const dimmed = highlightedIds && !highlighted;
+            const dep = a.kind === "dep" ? a : b;
+            const ecoColor = dep?.ecosystem ? ECOSYSTEM_COLOR[dep.ecosystem] : null;
+            const stroke = highlighted ? "#a78bfa" : (ecoColor ?? "currentColor");
             return (
               <line
                 key={`${a.id}->${b.id}`}
@@ -531,9 +579,9 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
-                stroke={highlighted ? "#a78bfa" : "currentColor"}
-                strokeWidth={highlighted ? 1.2 : 0.6}
-                opacity={dimmed ? 0.05 : highlighted ? 0.9 : 0.18}
+                stroke={stroke}
+                strokeWidth={highlighted ? 1.2 : 0.55}
+                opacity={dimmed ? 0.05 : highlighted ? 0.9 : ecoColor ? 0.22 : 0.18}
                 className="text-muted-foreground transition-opacity"
               />
             );
@@ -544,14 +592,25 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
           {nodes.map((n) => {
             const highlighted = highlightedIds ? highlightedIds.has(n.id) : true;
             const isHover = hoverId === n.id;
+            const isFocus = focusId === n.id;
+            const isHub = topHubIds.has(n.id);
             const fill =
               n.kind === "repo"
                 ? "url(#repo-grad)"
                 : n.ecosystem
                   ? `url(#dep-${n.ecosystem})`
                   : "#94a3b8";
-            const stroke = n.outdated ? outdatedColor(n.outdatedType) : "rgba(255,255,255,0.18)";
-            const strokeWidth = n.outdated ? 2 : 1;
+            const stroke = isFocus
+              ? "#ffffff"
+              : n.outdated
+                ? outdatedColor(n.outdatedType)
+                : "rgba(255,255,255,0.18)";
+            const strokeWidth = isFocus ? 2.5 : n.outdated ? 2 : 1;
+            const health = n.kind === "repo" ? repoHealth.get(n.id) : null;
+            const isCleanRepo = !!health && health.total > 0 && health.outdated === 0;
+            const labelVisible =
+              n.kind === "repo" || isHover || isFocus || isHub || (highlightedIds && highlighted);
+            const pulseDur = pulseDuration(n.outdatedType);
             return (
               // biome-ignore lint/a11y/noStaticElementInteractions: SVG node, no semantic equivalent
               <g
@@ -562,7 +621,7 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
                 onMouseLeave={() => setHoverId((prev) => (prev === n.id ? null : prev))}
                 onMouseDown={(e) => onNodeMouseDown(e, n)}
                 className="cursor-pointer"
-                opacity={highlighted ? 1 : 0.25}
+                opacity={highlighted ? 1 : 0.22}
                 style={{ transition: "opacity 120ms" }}
               >
                 {n.outdated ? (
@@ -570,25 +629,60 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
                     r={n.r + 4}
                     fill="none"
                     stroke={outdatedColor(n.outdatedType)}
-                    strokeWidth={1}
+                    strokeWidth={1.2}
                     opacity={0.4}
-                  />
+                  >
+                    <animate
+                      attributeName="r"
+                      values={`${n.r + 3};${n.r + 8};${n.r + 3}`}
+                      dur={pulseDur}
+                      repeatCount="indefinite"
+                    />
+                    <animate
+                      attributeName="opacity"
+                      values="0.15;0.55;0.15"
+                      dur={pulseDur}
+                      repeatCount="indefinite"
+                    />
+                  </circle>
+                ) : null}
+                {isCleanRepo ? (
+                  <circle
+                    r={n.r + 5}
+                    fill="none"
+                    stroke={HEALTHY_COLOR}
+                    strokeWidth={1.2}
+                    opacity={0.45}
+                  >
+                    <animate
+                      attributeName="opacity"
+                      values="0.2;0.55;0.2"
+                      dur="2.8s"
+                      repeatCount="indefinite"
+                    />
+                    <animate
+                      attributeName="r"
+                      values={`${n.r + 4};${n.r + 7};${n.r + 4}`}
+                      dur="2.8s"
+                      repeatCount="indefinite"
+                    />
+                  </circle>
                 ) : null}
                 <circle
                   r={n.r}
                   fill={fill}
                   stroke={stroke}
                   strokeWidth={strokeWidth}
-                  filter={isHover ? "url(#glow)" : undefined}
+                  filter={isHover || isFocus ? "url(#glow)" : undefined}
                 />
-                {n.kind === "repo" || isHover || (highlightedIds && highlighted) ? (
+                {labelVisible ? (
                   <text
                     y={n.r + 10}
                     textAnchor="middle"
                     className="pointer-events-none fill-foreground"
                     style={{
-                      fontSize: n.kind === "repo" ? 11 : 10,
-                      fontWeight: n.kind === "repo" ? 600 : 400,
+                      fontSize: n.kind === "repo" || isHub ? 11 : 10,
+                      fontWeight: n.kind === "repo" || isHub ? 600 : 400,
                       paintOrder: "stroke",
                       stroke: "hsl(var(--background))",
                       strokeWidth: 3,
@@ -604,7 +698,15 @@ export function DependencyGraph({ repos, outdated, ecosystemFilter, search, heig
         </g>
       </svg>
 
-      {hoveredNode ? <HoverPanel node={hoveredNode} adjacency={adjacency} nodes={nodes} /> : null}
+      {activeNode ? (
+        <HoverPanel
+          node={activeNode}
+          adjacency={adjacency}
+          nodes={nodes}
+          health={activeHealth}
+          pinned={focusId === activeNode.id}
+        />
+      ) : null}
     </div>
   );
 }
@@ -615,6 +717,15 @@ function outdatedColor(t: "patch" | "minor" | "major" | "unknown" | null): strin
   if (t === "patch") return "#10b981";
   return "#f59e0b";
 }
+
+function pulseDuration(t: "patch" | "minor" | "major" | "unknown" | null): string {
+  if (t === "major") return "1s";
+  if (t === "minor") return "1.6s";
+  if (t === "patch") return "2.4s";
+  return "1.6s";
+}
+
+const HEALTHY_COLOR = "#10b981";
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
@@ -658,14 +769,30 @@ function HoverPanel({
   node,
   adjacency,
   nodes,
+  health,
+  pinned,
 }: {
   node: Node;
   adjacency: Map<string, Set<string>>;
   nodes: Node[];
+  health: { total: number; outdated: number } | null;
+  pinned: boolean;
 }) {
   const connected = adjacency.get(node.id) ?? new Set();
   const others = nodes.filter((n) => connected.has(n.id));
   const isRepo = node.kind === "repo";
+  const freshPct =
+    health && health.total > 0
+      ? Math.round(((health.total - health.outdated) / health.total) * 100)
+      : null;
+  const healthColor =
+    freshPct == null
+      ? null
+      : freshPct === 100
+        ? HEALTHY_COLOR
+        : freshPct >= 80
+          ? "#f59e0b"
+          : "#ef4444";
   return (
     <div className="pointer-events-none absolute right-3 bottom-3 z-10 max-w-[320px] rounded-lg border bg-background/95 p-3 text-xs shadow-lg backdrop-blur-sm">
       <div className="flex items-center gap-2">
@@ -680,7 +807,14 @@ function HoverPanel({
           }}
         />
         <div className="min-w-0 flex-1">
-          <div className="truncate font-semibold text-sm text-foreground">{node.label}</div>
+          <div className="flex items-center gap-1.5">
+            <div className="truncate font-semibold text-sm text-foreground">{node.label}</div>
+            {pinned ? (
+              <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-primary">
+                focused
+              </span>
+            ) : null}
+          </div>
           <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
             {isRepo ? "repository" : (node.ecosystem ?? "unknown")}
             {node.outdated ? ` • ${node.outdatedType ?? "outdated"} update available` : null}
@@ -692,6 +826,27 @@ function HoverPanel({
           ? `${others.length} ${others.length === 1 ? "dependency" : "dependencies"}`
           : `used by ${others.length} ${others.length === 1 ? "repo" : "repos"}`}
       </div>
+      {isRepo && freshPct != null && healthColor ? (
+        <div className="mt-2">
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
+            <span>freshness</span>
+            <span style={{ color: healthColor }} className="font-semibold tabular-nums">
+              {freshPct}%
+            </span>
+          </div>
+          <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{ width: `${freshPct}%`, background: healthColor }}
+            />
+          </div>
+          <div className="mt-1 text-[10px] text-muted-foreground">
+            {health && health.outdated === 0
+              ? `all ${health.total} deps fresh`
+              : `${health?.outdated ?? 0} of ${health?.total ?? 0} outdated`}
+          </div>
+        </div>
+      ) : null}
       {others.length > 0 ? (
         <div className="mt-2 max-h-40 overflow-y-auto">
           <ul className="space-y-0.5">
