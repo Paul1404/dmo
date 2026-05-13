@@ -45,11 +45,7 @@ Railway picks up the `Dockerfile` automatically. The healthcheck path
 `DATABASE_URL` from the app service. Set `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (the deployed
 URL), `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` in the service variables.
 
-After the first deploy, run migrations once:
-
-```bash
-railway run bun run db:migrate
-```
+Migrations run automatically before each deploy via `preDeployCommand` in `railway.toml`.
 
 ## Environment variables
 
@@ -57,11 +53,11 @@ See `.env.example`.
 
 ## Scripts
 
-- `bun run dev` — start the dev server on port 3000
-- `bun run build` — production build into `dist/`
-- `bun run start` — run the built server
-- `bun run db:generate` — generate a migration from schema changes
-- `bun run db:migrate` — apply migrations
-- `bun run lint` — Biome
-- `bun run typecheck` — `tsc --noEmit`
-- `bun test` — Vitest
+- `bun run dev`: start the dev server on port 3000
+- `bun run build`: production build into `dist/`
+- `bun run start`: run the built server
+- `bun run db:generate`: generate a migration from schema changes
+- `bun run db:migrate`: apply migrations
+- `bun run lint`: Biome
+- `bun run typecheck`: `tsc --noEmit`
+- `bun test`: Vitest

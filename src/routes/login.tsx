@@ -2,7 +2,8 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
 import { ShieldCheck, Zap } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { authClient } from "~/lib/auth-client";
@@ -26,12 +27,40 @@ export const Route = createFileRoute("/login")({
 function LoginPage() {
   const [signingIn, setSigningIn] = useState(false);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get("error");
+    if (!err) return;
+    toast.error(
+      err === "oauth"
+        ? "GitHub sign-in was cancelled or failed. Please try again."
+        : `Sign-in failed: ${err}`,
+    );
+    params.delete("error");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }, []);
+
   async function handleSignIn() {
     setSigningIn(true);
-    await authClient.signIn.social({
+    const { data, error } = await authClient.signIn.social({
       provider: "github",
       callbackURL: "/dashboard",
+      errorCallbackURL: "/login?error=oauth",
     });
+    if (error) {
+      toast.error(error.message ?? "Could not start GitHub sign-in. Please try again.");
+      setSigningIn(false);
+      return;
+    }
+    if (data?.url) {
+      window.location.href = data.url;
+      return;
+    }
+    if (!data?.redirect) {
+      toast.error("GitHub sign-in did not return a redirect URL.");
+      setSigningIn(false);
+    }
   }
 
   return (
@@ -56,7 +85,7 @@ function LoginPage() {
               Search across all repositories you can access on GitHub.
             </Feature>
             <Feature icon={ShieldCheck} title="Your token, your control">
-              Auth via GitHub OAuth. We never store PR data — everything is live from the API.
+              Auth via GitHub OAuth. We never store PR data. Everything is live from the API.
             </Feature>
           </div>
         </div>
