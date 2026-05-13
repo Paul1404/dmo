@@ -170,7 +170,7 @@ function DashboardPage() {
     },
     onSuccess: (data) => {
       if (data.failed > 0) {
-        toast.warning(`Merged ${data.merged}/${data.total} — ${data.failed} failed`, {
+        toast.warning(`Merged ${data.merged}/${data.total}, ${data.failed} failed`, {
           description: data.results
             .filter((r) => !r.ok)
             .slice(0, 3)
@@ -433,7 +433,7 @@ function StatCard({
         <div>
           <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
           <div className="text-2xl font-semibold tabular-nums">
-            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : (value ?? "—")}
+            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : (value ?? "-")}
           </div>
         </div>
       </CardContent>

@@ -15,6 +15,7 @@
     "db:migrate:prod": "bun src/server/db/migrate.ts",
     "db:push": "drizzle-kit push",
     "auth:generate": "better-auth generate --output src/server/db/auth-schema.ts",
+    "icons:generate": "bun scripts/generate-icons.ts",
     "test": "vitest run"
   },
   "dependencies": {
@@ -57,6 +58,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "drizzle-kit": "^0.31.10",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.12",

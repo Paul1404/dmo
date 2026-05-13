@@ -85,7 +85,7 @@ function LoginPage() {
               Search across all repositories you can access on GitHub.
             </Feature>
             <Feature icon={ShieldCheck} title="Your token, your control">
-              Auth via GitHub OAuth. We never store PR data — everything is live from the API.
+              Auth via GitHub OAuth. We never store PR data. Everything is live from the API.
             </Feature>
           </div>
         </div>
