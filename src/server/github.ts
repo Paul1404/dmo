@@ -64,15 +64,14 @@ export function octokitFor(token: string): Octokit {
           retryCount,
           kind: "secondary" as const,
         };
-        if (retryCount < 2 && retryAfter <= 30) {
-          log.warn("github secondary rate limit hit, retrying", ctx);
+        // Secondary rate limits on /search/* almost always return retryAfter ~60s.
+        // Wait it out once rather than failing fast and asking the user to retry.
+        if (retryCount < 1 && retryAfter <= 90) {
+          log.warn("github secondary rate limit hit, waiting and retrying", ctx);
           return true;
         }
         log.error("github secondary rate limit exhausted", ctx);
-        throw new GithubRateLimitError(
-          `GitHub secondary rate limit hit on ${options.method} ${options.url}. Retry after ${retryAfter}s.`,
-          retryAfter,
-        );
+        return false;
       },
     },
   });
@@ -171,7 +170,18 @@ function parseTitle(title: string): {
   return { dependency: m[1] ?? null, from: m[2] ?? null, to: m[3] ?? null };
 }
 
-export async function listDependabotPrs(token: string): Promise<DependabotPr[]> {
+const DEPENDABOT_CACHE_TTL_MS = 60_000;
+const dependabotCache = new Map<string, { data: DependabotPr[]; expiresAt: number }>();
+
+export function invalidateDependabotCache(userId: string): void {
+  dependabotCache.delete(userId);
+}
+
+export async function listDependabotPrs(userId: string, token: string): Promise<DependabotPr[]> {
+  const now = Date.now();
+  const cached = dependabotCache.get(userId);
+  if (cached && cached.expiresAt > now) return cached.data;
+
   const octokit = octokitFor(token);
   const query = "is:pr is:open author:app/dependabot archived:false";
 
@@ -224,19 +234,47 @@ export async function listDependabotPrs(token: string): Promise<DependabotPr[]> 
     if (results.length >= data.total_count) break;
     page += 1;
     if (page > 10) break; // hard cap, 1000 PRs
-    // Small pacing delay to stay under GitHub search secondary rate limits.
-    await new Promise((r) => setTimeout(r, 250));
+    // Pacing delay to stay under GitHub search secondary rate limits.
+    await new Promise((r) => setTimeout(r, 1500));
   }
+  dependabotCache.set(userId, { data: results, expiresAt: Date.now() + DEPENDABOT_CACHE_TTL_MS });
   return results;
+}
+
+type OctokitErrorShape = {
+  status?: number;
+  response?: {
+    headers?: Record<string, string | undefined>;
+    data?: { message?: string };
+  };
+};
+
+function detectRateLimit(err: OctokitErrorShape): GithubRateLimitError | null {
+  const status = err.status;
+  if (status !== 403 && status !== 429) return null;
+  const headers = err.response?.headers ?? {};
+  const remaining = headers["x-ratelimit-remaining"];
+  const retryAfterHeader = headers["retry-after"];
+  const body = err.response?.data?.message ?? "";
+  const looksLikeRateLimit =
+    remaining === "0" ||
+    retryAfterHeader != null ||
+    /rate limit/i.test(body) ||
+    /abuse/i.test(body);
+  if (!looksLikeRateLimit) return null;
+  const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) || 60 : 60;
+  return new GithubRateLimitError(`GitHub rate limit hit. Retry after ${retryAfter}s.`, retryAfter);
 }
 
 function mapGithubError(err: unknown, action: string): Error {
   if (err instanceof GithubRateLimitError || err instanceof GithubAuthError) return err;
-  const status = (err as { status?: number }).status;
+  const e = err as OctokitErrorShape;
+  const status = e.status;
   const message = err instanceof Error ? err.message : String(err);
+  const rateLimit = detectRateLimit(e);
+  if (rateLimit) return rateLimit;
   if (status === 401) return new GithubAuthError(`GitHub rejected the token. Sign in again.`);
   if (status === 403) {
-    // 403 without rate-limit handler hit typically means missing scope, SSO, or org access.
     return new GithubAuthError(
       `GitHub denied access while trying to ${action}. Check token scopes (repo) and any org SAML SSO authorization.`,
     );

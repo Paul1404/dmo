@@ -5,6 +5,7 @@ import {
   GithubAuthError,
   GithubRateLimitError,
   getGithubTokenForUser,
+  invalidateDependabotCache,
   listAccessibleRepos,
   listDependabotPrs,
 } from "~/server/github";
@@ -71,7 +72,7 @@ export const router = {
   dependabot: {
     list: githubGuard.handler(async ({ context }) => {
       const token = await getGithubTokenForUser(context.user.id);
-      return listDependabotPrs(token);
+      return listDependabotPrs(context.user.id, token);
     }),
 
     approveAndMerge: githubGuard
@@ -88,6 +89,7 @@ export const router = {
           const r = await approveAndMergePr(token, pr.owner, pr.repo, pr.number, input.mergeMethod);
           results.push(r);
         }
+        invalidateDependabotCache(context.user.id);
         return {
           total: results.length,
           merged: results.filter((r) => r.merged).length,

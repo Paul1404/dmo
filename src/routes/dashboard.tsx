@@ -104,6 +104,8 @@ function DashboardPage() {
   const prs = useQuery({
     queryKey: ["dependabot", "list"],
     queryFn: () => orpc.dependabot.list(),
+    retry: false,
+    staleTime: 60_000,
   });
 
   const filtered = useMemo(() => {
