@@ -12,8 +12,8 @@ import {
   GitPullRequest,
   Loader2,
   Play,
+  RefreshCw,
   Save,
-  Square,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -152,7 +152,7 @@ function OrchestratorPage() {
 
   const savedTemplate = template.data?.yamlContent ?? null;
   const templateValue = draftTemplate ?? savedTemplate ?? DEFAULT_TEMPLATE;
-  const templateDirty = draftTemplate != null && draftTemplate !== (savedTemplate ?? "");
+  const templateDirty = templateValue !== (savedTemplate ?? "");
 
   const templateError = useMemo(() => {
     if (!templateValue.trim()) return "Template cannot be empty";
@@ -331,7 +331,7 @@ function OrchestratorPage() {
                   {current.isFetching ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
-                    <Square className="h-4 w-4" />
+                    <RefreshCw className="h-4 w-4" />
                   )}
                   Refresh
                 </Button>
