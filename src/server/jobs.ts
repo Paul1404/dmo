@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import { db } from "~/server/db";
 import { mergeJobItems, mergeJobs } from "~/server/db/schema";
 import {
@@ -131,13 +131,16 @@ export type JobItemView = {
 };
 
 export async function listJobsForUser(userId: string, limit = 50): Promise<JobView[]> {
-  const jobs = await db
+  // Query newest first so we always show recent activity, then return ascending so
+  // consumers that rely on chronological order (e.g. slice(-3) for the latest few) keep working.
+  const recent = await db
     .select()
     .from(mergeJobs)
     .where(eq(mergeJobs.userId, userId))
-    .orderBy(asc(mergeJobs.createdAt))
+    .orderBy(desc(mergeJobs.createdAt))
     .limit(limit);
-  if (jobs.length === 0) return [];
+  if (recent.length === 0) return [];
+  const jobs = recent.slice().reverse();
   const items = await db
     .select()
     .from(mergeJobItems)
@@ -233,7 +236,11 @@ async function tick(): Promise<void> {
     active.map((j) => {
       const existing = inFlightJobs.get(j.id);
       if (existing) return existing;
-      const p = processJob(j.id).finally(() => inFlightJobs.delete(j.id));
+      const p = processJob(j.id)
+        .catch((err) => {
+          log.error("processJob threw uncaught error", { jobId: j.id, err });
+        })
+        .finally(() => inFlightJobs.delete(j.id));
       inFlightJobs.set(j.id, p);
       return p;
     }),

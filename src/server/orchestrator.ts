@@ -241,7 +241,11 @@ async function tick(): Promise<void> {
     active.map((r) => {
       const existing = inFlightRuns.get(r.id);
       if (existing) return existing;
-      const p = processRun(r.id).finally(() => inFlightRuns.delete(r.id));
+      const p = processRun(r.id)
+        .catch((err) => {
+          log.error("processRun threw uncaught error", { runId: r.id, err });
+        })
+        .finally(() => inFlightRuns.delete(r.id));
       inFlightRuns.set(r.id, p);
       return p;
     }),

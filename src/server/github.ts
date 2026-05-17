@@ -471,6 +471,7 @@ export async function createConfigSyncPr(
   const defaultBranch = await getDefaultBranch(token, owner, repo);
   const branchName = `${CONFIG_BRANCH_PREFIX}-${options.runId.slice(0, 8)}`;
 
+  let branchExisted = false;
   try {
     await octokit.rest.git.createRef({
       owner,
@@ -482,7 +483,34 @@ export async function createConfigSyncPr(
     const status = (err as { status?: number }).status;
     if (status !== 422)
       throw mapGithubError(err, `create branch ${branchName} on ${owner}/${repo}`);
-    // Branch already exists from a prior failed attempt. Reuse it.
+    branchExisted = true;
+  }
+
+  // When reusing a branch from a prior failed attempt, the file on that branch
+  // may already differ from the default branch. We must commit against the
+  // file SHA on the branch itself or GitHub rejects the update with 409.
+  let commitSha: string | undefined = current?.sha;
+  if (branchExisted) {
+    try {
+      const { data } = await octokit.rest.repos.getContent({
+        owner,
+        repo,
+        path: targetPath,
+        ref: branchName,
+      });
+      if (!Array.isArray(data) && data.type === "file" && "sha" in data) {
+        commitSha = data.sha;
+      } else {
+        commitSha = undefined;
+      }
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status === 404) {
+        commitSha = undefined;
+      } else {
+        throw mapGithubError(err, `read ${targetPath} on ${owner}/${repo}@${branchName}`);
+      }
+    }
   }
 
   try {
@@ -493,7 +521,7 @@ export async function createConfigSyncPr(
       message: options.commitMessage,
       content: encodeBase64(options.desiredYaml),
       branch: branchName,
-      sha: current?.sha,
+      sha: commitSha,
     });
   } catch (err) {
     throw mapGithubError(err, `commit ${targetPath} on ${owner}/${repo}@${branchName}`);

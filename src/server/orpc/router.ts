@@ -4,7 +4,7 @@ import * as v from "valibot";
 import { parse as parseYaml } from "yaml";
 import { db } from "~/server/db";
 import { dependabotTemplates, watchedRepos } from "~/server/db/schema";
-import { listDependenciesOverview } from "~/server/dependencies";
+import { invalidateDependenciesCache, listDependenciesOverview } from "~/server/dependencies";
 import {
   type DependabotConfigFile,
   GithubAuthError,
@@ -126,6 +126,7 @@ export const router = {
           }
         });
         invalidateDependabotCache(userId);
+        invalidateDependenciesCache(userId);
         return { count: input.repos.length };
       }),
   },
@@ -228,10 +229,13 @@ export const router = {
               error: null,
             };
           } catch (err) {
-            if (err instanceof GithubRateLimitError) {
+            if (err instanceof GithubAuthError) {
               fatal = err;
               return;
             }
+            // Rate limit on a single repo: record the error and keep scanning the
+            // others. The orchestrator drift view is far more useful with partial
+            // data than with nothing.
             results[i] = {
               owner: repo.owner,
               name: repo.name,
