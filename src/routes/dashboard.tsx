@@ -198,8 +198,9 @@ function DashboardPage() {
         arr.push(p);
         byRepo.set(key, arr);
       }
+      const entries = Array.from(byRepo.entries());
       const results = await Promise.allSettled(
-        Array.from(byRepo.values()).map((prsInRepo) => {
+        entries.map(([, prsInRepo]) => {
           const first = prsInRepo[0];
           if (!first) throw new Error("empty repo group");
           return orpc.jobs.enqueue({
@@ -214,12 +215,22 @@ function DashboardPage() {
         }),
       );
       const queued = results.filter((r) => r.status === "fulfilled").length;
-      const failed = results.length - queued;
-      return { queued, failed, repos: byRepo.size };
+      const failures = results
+        .map((r, idx) => ({ r, repo: entries[idx]?.[0] ?? "" }))
+        .filter((x): x is { r: PromiseRejectedResult; repo: string } => x.r.status === "rejected");
+      return { queued, failures, repos: byRepo.size };
     },
     onSuccess: (data) => {
-      if (data.failed > 0) {
-        toast.warning(`Queued ${data.queued}/${data.repos} repos, ${data.failed} failed to queue`);
+      if (data.failures.length > 0) {
+        const first = data.failures[0];
+        const reason = first
+          ? first.r.reason instanceof Error
+            ? first.r.reason.message
+            : String(first.r.reason)
+          : "unknown";
+        toast.warning(
+          `Queued ${data.queued}/${data.repos} repos. ${data.failures.length} failed: ${reason}`,
+        );
       } else {
         toast.success(`Queued ${data.queued} repo${data.queued === 1 ? "" : "s"}`);
       }

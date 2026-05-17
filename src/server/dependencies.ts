@@ -197,8 +197,11 @@ async function scanRepo(octokit: Octokit, repo: WatchedRepoRef): Promise<RepoDep
     fetchFileContent(octokit, repo.owner, repo.name, "requirements.txt"),
   ]);
 
+  // Auth errors are non-recoverable — surface immediately. Rate-limit on a single file
+  // is treated as a per-repo issue so a single throttled fetch doesn't discard the
+  // dependencies we already collected for sibling repos.
   for (const t of tasks) {
-    if (t.status === "rejected" && t.reason instanceof GithubRateLimitError) {
+    if (t.status === "rejected" && t.reason instanceof GithubAuthError) {
       throw t.reason;
     }
   }
@@ -269,16 +272,18 @@ export async function listDependenciesOverview(
       try {
         results[i] = await scanRepo(octokit, repo);
       } catch (err) {
-        if (err instanceof GithubRateLimitError) {
-          fatal = err;
-          return;
-        }
         if (err instanceof GithubAuthError) {
           fatal = err;
           return;
         }
+        // Rate limit on a single repo is recorded against that repo so the rest
+        // of the overview still renders. Workers keep running — most likely the
+        // throttle plugin's wait already happened, and subsequent requests may
+        // succeed.
+        const isRateLimit = err instanceof GithubRateLimitError;
         log.warn("dependency scan failed for repo", {
           repo: `${repo.owner}/${repo.name}`,
+          rateLimit: isRateLimit,
           message: err instanceof Error ? err.message : String(err),
         });
         results[i] = {
