@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  ClipboardCopy,
   ExternalLink,
   FileCode,
   GitBranch,
@@ -101,6 +102,56 @@ const MERGE_METHODS = [
 
 function prKey(pr: DependabotPr) {
   return `${pr.repoFullName}#${pr.number}`;
+}
+
+function buildLlmPrompt(prs: DependabotPr[]): string {
+  const byRepo = new Map<string, DependabotPr[]>();
+  for (const p of prs) {
+    const arr = byRepo.get(p.repoFullName) ?? [];
+    arr.push(p);
+    byRepo.set(p.repoFullName, arr);
+  }
+
+  const sections: string[] = [];
+  for (const [repo, list] of byRepo.entries()) {
+    list.sort((a, b) => a.number - b.number);
+    const lines = list.map((p) => {
+      const dep = p.dependency ?? "unknown";
+      const versions =
+        p.fromVersion && p.toVersion ? `${p.fromVersion} to ${p.toVersion}` : "version not parsed";
+      return [
+        `- #${p.number} ${dep} (${p.ecosystem}, ${p.updateType}): ${versions}`,
+        `  ${p.htmlUrl}`,
+        `  title: ${p.title}`,
+      ].join("\n");
+    });
+    sections.push(
+      `## ${repo} (${list.length} open Dependabot PR${list.length === 1 ? "" : "s"})\n\n${lines.join("\n")}`,
+    );
+  }
+
+  const total = prs.length;
+  const repoCount = byRepo.size;
+
+  return `I have ${total} open Dependabot PR${total === 1 ? "" : "s"} across ${repoCount} repo${repoCount === 1 ? "" : "s"}. Help me triage and merge them safely. Do not just merge everything.
+
+${sections.join("\n\n")}
+
+How to work through them:
+
+1. Do not merge blindly. Investigate each PR before merging.
+2. Group related updates that should land together as one batch (e.g. react and react-dom, drizzle-orm and drizzle-kit, @types/x with the runtime package x, eslint and its plugins). Merging one half of a pair without the other often breaks the build.
+3. For each PR check:
+   - The diff and the upstream release notes or changelog for the target version
+   - Whether any other open PR in the same repo touches the same files (potential conflict)
+   - Whether in-tree usage relies on APIs that the new version removed or changed
+4. Merge order within a repo: patches first, then minors, then majors. Hold all major version bumps for explicit confirmation. Hold toolchain bumps (vite, typescript, bun, drizzle-kit, biome, vitest, tanstack-*) for explicit confirmation even on minor bumps, since they often cascade.
+5. After each merge, the remaining PRs go stale. Rebase them (\`gh pr update-branch <num>\` or comment \`@dependabot rebase\`) and re-check mergeability before merging the next one. Do not fire off all merges in parallel.
+6. To merge, use \`gh pr merge <num> --squash\` (or --merge / --rebase to match the repo's policy). If self-approval is required, approve first with \`gh pr review <num> --approve\`.
+7. If a PR has CI failures, read the logs before deciding. A failure caused by the bump itself means hold; a flake means re-run.
+8. At the end, report three lists: merged, skipped (with reason), needs human review (with reason).
+
+Start by reading the diffs of the PRs above and proposing the merge order before doing anything.`;
 }
 
 function DashboardPage() {
@@ -264,6 +315,24 @@ function DashboardPage() {
   async function handleSignOut() {
     await authClient.signOut();
     router.navigate({ to: "/login" });
+  }
+
+  async function handleCopyLlmPrompt() {
+    const source = selectedPrs.length > 0 ? selectedPrs : filtered;
+    if (source.length === 0) {
+      toast.error("No PRs to copy");
+      return;
+    }
+    const prompt = buildLlmPrompt(source);
+    try {
+      await navigator.clipboard.writeText(prompt);
+      const scope = selectedPrs.length > 0 ? "selected" : "filtered";
+      toast.success(
+        `Copied prompt for ${source.length} ${scope} PR${source.length === 1 ? "" : "s"}`,
+      );
+    } catch {
+      toast.error("Clipboard blocked. Check browser permissions.");
+    }
   }
 
   return (
@@ -433,6 +502,16 @@ function DashboardPage() {
               </div>
 
               <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCopyLlmPrompt}
+                  disabled={filtered.length === 0 && selectedPrs.length === 0}
+                  title="Copy a prompt you can paste into Claude Code or another LLM to merge these PRs carefully"
+                >
+                  <ClipboardCopy className="h-4 w-4" />
+                  Copy LLM prompt
+                </Button>
                 <Select
                   value={mergeMethod}
                   onValueChange={(v) => setMergeMethod(v as typeof mergeMethod)}
