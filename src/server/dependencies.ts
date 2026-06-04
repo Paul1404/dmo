@@ -58,7 +58,7 @@ async function fetchFileContent(
   }
 }
 
-function parsePackageJson(content: string): Dependency[] {
+export function parsePackageJson(content: string): Dependency[] {
   try {
     const parsed = JSON.parse(content) as {
       dependencies?: Record<string, string>;
@@ -78,13 +78,18 @@ function parsePackageJson(content: string): Dependency[] {
         out.push({ name, version, ecosystem: "npm", dev: false });
       }
     }
+    for (const [name, version] of Object.entries(parsed.optionalDependencies ?? {})) {
+      if (!out.some((d) => d.name === name)) {
+        out.push({ name, version, ecosystem: "npm", dev: false });
+      }
+    }
     return out;
   } catch {
     return [];
   }
 }
 
-function parseDockerfile(content: string): Dependency[] {
+export function parseDockerfile(content: string): Dependency[] {
   const out: Dependency[] = [];
   const seen = new Set<string>();
   const lines = content.split(/\r?\n/);
@@ -115,7 +120,7 @@ function parseDockerfile(content: string): Dependency[] {
   return out;
 }
 
-function parseRequirementsTxt(content: string): Dependency[] {
+export function parseRequirementsTxt(content: string): Dependency[] {
   const out: Dependency[] = [];
   const lines = content.split(/\r?\n/);
   for (const raw of lines) {
@@ -131,7 +136,7 @@ function parseRequirementsTxt(content: string): Dependency[] {
   return out;
 }
 
-function parsePyprojectToml(content: string): Dependency[] {
+export function parsePyprojectToml(content: string): Dependency[] {
   const out: Dependency[] = [];
   const seen = new Set<string>();
 
