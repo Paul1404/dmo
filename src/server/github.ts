@@ -138,7 +138,7 @@ const ECOSYSTEM_LABELS: Record<string, Ecosystem> = {
   composer: "composer",
 };
 
-function detectEcosystem(labels: string[]): Ecosystem {
+export function detectEcosystem(labels: string[]): Ecosystem {
   for (const label of labels) {
     const mapped = ECOSYSTEM_LABELS[label.toLowerCase()];
     if (mapped) return mapped;
@@ -149,7 +149,7 @@ function detectEcosystem(labels: string[]): Ecosystem {
 const BUMP_RE =
   /bump\s+(?:`)?([\w@./-]+)(?:`)?\s+from\s+(?:`)?([\w.+-]+)(?:`)?\s+to\s+(?:`)?([\w.+-]+)(?:`)?/i;
 
-function classifyUpdate(from: string | null, to: string | null): UpdateType {
+export function classifyUpdate(from: string | null, to: string | null): UpdateType {
   if (!from || !to) return "unknown";
   const fromParts = from
     .replace(/^v/, "")
@@ -166,7 +166,7 @@ function classifyUpdate(from: string | null, to: string | null): UpdateType {
   return "unknown";
 }
 
-function parseTitle(title: string): {
+export function parseTitle(title: string): {
   dependency: string | null;
   from: string | null;
   to: string | null;
@@ -618,6 +618,12 @@ export async function approveAndMergePr(
     // 409: SHA mismatch (someone else updated). Both are transient: try again later.
     if (status === 405 || status === 409) return { kind: "not_mergeable" };
     if (status === 403) {
+      // A 403 can be a hard permission/branch-protection block OR a transient
+      // secondary rate limit ("abuse detection"). Only the former is permanent.
+      // Misreading a rate limit as "blocked" fails the PR for good instead of
+      // letting the worker back off and retry.
+      const rateLimit = detectRateLimit(err as OctokitErrorShape);
+      if (rateLimit) throw rateLimit;
       const message = err instanceof Error ? err.message : String(err);
       return { kind: "blocked", reason: message };
     }
