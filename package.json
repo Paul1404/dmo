@@ -43,7 +43,7 @@
     "drizzle-valibot": "^0.4.2",
     "lucide-react": "^1.14.0",
     "pg": "^8.20.0",
-    "react": "^19.2.6",
+    "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
