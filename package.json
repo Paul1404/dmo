@@ -42,7 +42,7 @@
     "drizzle-orm": "^0.45.2",
     "drizzle-valibot": "^0.4.2",
     "lucide-react": "^1.14.0",
-    "pg": "^8.20.0",
+    "pg": "^8.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "sonner": "^2.0.7",
