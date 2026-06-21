@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, redirect, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
-import { ArrowLeft, Check, GitBranch, Loader2, Lock, Save, Search } from "lucide-react";
+import { ArrowLeft, Check, GitBranch, Loader2, Lock, Save, Search, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "~/components/ui/badge";
@@ -77,6 +77,12 @@ function ReposPage() {
     return accessible.data.filter((r) => r.fullName.toLowerCase().includes(q));
   }, [accessible.data, search]);
 
+  const unavailableWatched = useMemo(() => {
+    if (!accessible.data || !watched.data) return [];
+    const accessibleKeys = new Set(accessible.data.map((r) => repoKey(r.owner, r.name)));
+    return watched.data.filter((r) => !accessibleKeys.has(repoKey(r.owner, r.name)));
+  }, [accessible.data, watched.data]);
+
   const dirty =
     draft != null &&
     initialSelected != null &&
@@ -109,6 +115,13 @@ function ReposPage() {
 
   function clearAll() {
     setDraft(new Set());
+  }
+
+  function removeUnavailableWatched() {
+    const staleKeys = new Set(unavailableWatched.map((r) => repoKey(r.owner, r.name)));
+    const next = new Set(selected);
+    for (const key of staleKeys) next.delete(key);
+    setDraft(next);
   }
 
   return (
@@ -166,6 +179,15 @@ function ReposPage() {
               <Button variant="ghost" size="sm" onClick={clearAll} disabled={selected.size === 0}>
                 Clear all
               </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={removeUnavailableWatched}
+                disabled={unavailableWatched.length === 0}
+              >
+                <Trash2 className="h-4 w-4" />
+                Remove unavailable
+              </Button>
             </div>
             <Separator />
             <div className="text-xs text-muted-foreground">
@@ -186,7 +208,7 @@ function ReposPage() {
                 title="Failed to load repositories"
                 description={(accessible.error as Error).message}
               />
-            ) : filtered.length === 0 ? (
+            ) : filtered.length === 0 && unavailableWatched.length === 0 ? (
               <EmptyState
                 icon={GitBranch}
                 title="No repositories match"
@@ -198,6 +220,56 @@ function ReposPage() {
               />
             ) : (
               <ul className="divide-y">
+                {unavailableWatched.length > 0 ? (
+                  <li className="bg-muted/35 px-4 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium">Unavailable watched repositories</div>
+                        <div className="text-xs text-muted-foreground">
+                          These saved names are no longer returned by GitHub. Remove them here, then
+                          save.
+                        </div>
+                      </div>
+                      <Button variant="outline" size="sm" onClick={removeUnavailableWatched}>
+                        <Trash2 className="h-4 w-4" />
+                        Remove all
+                      </Button>
+                    </div>
+                  </li>
+                ) : null}
+                {unavailableWatched.map((r) => {
+                  const key = repoKey(r.owner, r.name);
+                  const checked = selected.has(key);
+                  const id = `repo-unavailable-${key}`;
+                  return (
+                    <li
+                      key={`unavailable-${key}`}
+                      className={cn(
+                        "flex items-center gap-3 px-4 py-3 hover:bg-accent/30",
+                        checked && "bg-destructive/5",
+                      )}
+                    >
+                      <Checkbox
+                        id={id}
+                        checked={checked}
+                        onCheckedChange={() => toggle(key)}
+                        aria-label={`Watch unavailable repository ${key}`}
+                      />
+                      <label htmlFor={id} className="flex-1 min-w-0 cursor-pointer">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium truncate">{key}</span>
+                          <Badge variant="outline">unavailable</Badge>
+                        </div>
+                      </label>
+                      {checked ? <Check className="h-4 w-4 text-destructive" /> : null}
+                    </li>
+                  );
+                })}
+                {unavailableWatched.length > 0 && filtered.length > 0 ? (
+                  <li className="px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Accessible repositories
+                  </li>
+                ) : null}
                 {filtered.map((r) => {
                   const key = repoKey(r.owner, r.name);
                   const checked = selected.has(key);
