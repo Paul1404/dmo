@@ -303,10 +303,7 @@ async function processJob(jobId: string): Promise<void> {
         error: readiness.merged ? null : "PR was closed without merging",
       });
       if (readiness.merged) {
-        await db
-          .update(mergeJobs)
-          .set({ mergedCount: job.mergedCount + 1, updatedAt: new Date() })
-          .where(eq(mergeJobs.id, jobId));
+        await updateJobCounts(jobId, { mergedCount: job.mergedCount + 1 });
       }
       return;
     }
@@ -316,10 +313,7 @@ async function processJob(jobId: string): Promise<void> {
         status: "failed",
         error: "PR is a draft",
       });
-      await db
-        .update(mergeJobs)
-        .set({ failedCount: job.failedCount + 1, updatedAt: new Date() })
-        .where(eq(mergeJobs.id, jobId));
+      await updateJobCounts(jobId, { failedCount: job.failedCount + 1 });
       return;
     }
 
@@ -328,10 +322,7 @@ async function processJob(jobId: string): Promise<void> {
         status: "failed",
         error: readiness.reason,
       });
-      await db
-        .update(mergeJobs)
-        .set({ failedCount: job.failedCount + 1, updatedAt: new Date() })
-        .where(eq(mergeJobs.id, jobId));
+      await updateJobCounts(jobId, { failedCount: job.failedCount + 1 });
       return;
     }
 
@@ -349,10 +340,7 @@ async function processJob(jobId: string): Promise<void> {
           status: "failed",
           error: "Timed out waiting for Dependabot to resolve conflicts",
         });
-        await db
-          .update(mergeJobs)
-          .set({ failedCount: job.failedCount + 1, updatedAt: new Date() })
-          .where(eq(mergeJobs.id, jobId));
+        await updateJobCounts(jobId, { failedCount: job.failedCount + 1 });
         return;
       }
       await markItem(jobId, item.prNumber, {
@@ -377,10 +365,7 @@ async function processJob(jobId: string): Promise<void> {
 
     if (outcome.kind === "merged") {
       await markItem(jobId, item.prNumber, { status: "merged", error: null });
-      await db
-        .update(mergeJobs)
-        .set({ mergedCount: job.mergedCount + 1, updatedAt: new Date() })
-        .where(eq(mergeJobs.id, jobId));
+      await updateJobCounts(jobId, { mergedCount: job.mergedCount + 1 });
       invalidateDependabotCache(job.userId);
       return;
     }
@@ -398,10 +383,7 @@ async function processJob(jobId: string): Promise<void> {
       status: "failed",
       error: outcome.reason,
     });
-    await db
-      .update(mergeJobs)
-      .set({ failedCount: job.failedCount + 1, updatedAt: new Date() })
-      .where(eq(mergeJobs.id, jobId));
+    await updateJobCounts(jobId, { failedCount: job.failedCount + 1 });
   } catch (err) {
     if (err instanceof GithubRateLimitError) {
       log.warn("worker hit github rate limit, deferring", {
@@ -425,10 +407,7 @@ async function processJob(jobId: string): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
       attempts: item.attempts + 1,
     });
-    await db
-      .update(mergeJobs)
-      .set({ failedCount: job.failedCount + 1, updatedAt: new Date() })
-      .where(eq(mergeJobs.id, jobId));
+    await updateJobCounts(jobId, { failedCount: job.failedCount + 1 });
   }
 }
 
@@ -464,16 +443,35 @@ async function touchItem(jobId: string, prNumber: number): Promise<void> {
 
 async function finalizeJob(jobId: string, status: JobStatus, error?: string): Promise<void> {
   const now = new Date();
+  const items = await db
+    .select({ status: mergeJobItems.status })
+    .from(mergeJobItems)
+    .where(eq(mergeJobItems.jobId, jobId));
+  const mergedCount = items.reduce((n, item) => n + (item.status === "merged" ? 1 : 0), 0);
+  const failedCount = items.reduce((n, item) => n + (item.status === "failed" ? 1 : 0), 0);
   await db
     .update(mergeJobs)
     .set({
       status,
+      mergedCount,
+      failedCount,
       updatedAt: now,
       finishedAt: now,
       error: error ?? null,
     })
     .where(eq(mergeJobs.id, jobId));
   log.info("merge job finalized", { jobId, status, error });
+  await notifyJobChanged(jobId);
+}
+
+async function updateJobCounts(
+  jobId: string,
+  patch: Partial<Pick<typeof mergeJobs.$inferSelect, "mergedCount" | "failedCount">>,
+): Promise<void> {
+  await db
+    .update(mergeJobs)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(eq(mergeJobs.id, jobId));
   await notifyJobChanged(jobId);
 }
 

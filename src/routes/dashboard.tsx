@@ -848,7 +848,15 @@ function JobCard({
   cancelling: boolean;
 }) {
   const active = job.status === "queued" || job.status === "running";
-  const done = job.mergedCount + job.failedCount + skippedCount(job);
+  const itemMergedCount = job.items.reduce((n, i) => n + (i.status === "merged" ? 1 : 0), 0);
+  const itemFailedCount = job.items.reduce((n, i) => n + (i.status === "failed" ? 1 : 0), 0);
+  const skipped = skippedCount(job);
+  const merged = Math.max(job.mergedCount, itemMergedCount);
+  const failed = Math.max(job.failedCount, itemFailedCount);
+  const done =
+    active || merged + failed + skipped < job.totalCount
+      ? merged + failed + skipped
+      : job.totalCount;
   const remaining = Math.max(0, job.totalCount - done);
   const pct = job.totalCount === 0 ? 0 : Math.round((done / job.totalCount) * 100);
   const currentItem = active
@@ -878,8 +886,9 @@ function JobCard({
               />
             ) : null}
             <span className="tabular-nums">
-              {job.mergedCount}/{job.totalCount} merged
-              {job.failedCount > 0 ? `, ${job.failedCount} failed` : null}
+              {merged}/{job.totalCount} merged
+              {failed > 0 ? `, ${failed} failed` : null}
+              {skipped > 0 ? `, ${skipped} skipped` : null}
             </span>
           </div>
         </div>

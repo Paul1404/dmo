@@ -12,6 +12,10 @@ function invalidateTopic(queryClient: QueryClient, topic: LiveTopic) {
   queryClient.invalidateQueries({ queryKey: ["orchestrator", "runs"] });
 }
 
+function invalidateTopics(queryClient: QueryClient, topics: LiveTopic[]) {
+  for (const topic of topics) invalidateTopic(queryClient, topic);
+}
+
 export function useLiveUpdates(topics: LiveTopic[]) {
   const queryClient = useQueryClient();
   const topicKey = topics.join(",");
@@ -20,11 +24,26 @@ export function useLiveUpdates(topics: LiveTopic[]) {
     const activeTopics = topicKey.split(",").filter(Boolean) as LiveTopic[];
     if (activeTopics.length === 0) return;
     const source = new EventSource("/api/live");
+    const settleTimers = new Set<ReturnType<typeof setTimeout>>();
 
-    for (const topic of activeTopics) {
-      source.addEventListener(topic, () => invalidateTopic(queryClient, topic));
+    function invalidateNowAndSettled(topic: LiveTopic) {
+      invalidateTopic(queryClient, topic);
+      const timer = setTimeout(() => {
+        settleTimers.delete(timer);
+        invalidateTopic(queryClient, topic);
+      }, 750);
+      settleTimers.add(timer);
     }
 
-    return () => source.close();
+    source.addEventListener("connected", () => invalidateTopics(queryClient, activeTopics));
+
+    for (const topic of activeTopics) {
+      source.addEventListener(topic, () => invalidateNowAndSettled(topic));
+    }
+
+    return () => {
+      source.close();
+      for (const timer of settleTimers) clearTimeout(timer);
+    };
   }, [queryClient, topicKey]);
 }
