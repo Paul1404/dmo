@@ -14,10 +14,12 @@ import {
   Play,
   RefreshCw,
   Save,
+  X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { parse as parseYaml } from "yaml";
+import { ElapsedTimer } from "~/components/ElapsedTimer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
@@ -636,25 +638,66 @@ function RunRow({
   cancelling: boolean;
 }) {
   const active = run.status === "queued" || run.status === "running";
+  const done = run.syncedCount + run.skippedCount + run.failedCount;
+  const pct = run.totalCount === 0 ? 0 : Math.round((done / run.totalCount) * 100);
+  const currentItem = active
+    ? (run.items.find((i) => i.status === "syncing") ??
+      run.items.find((i) => i.status === "queued") ??
+      null)
+    : null;
+  const startedAt = run.startedAt ?? run.createdAt;
   return (
-    <li className="px-3 py-2 text-sm">
+    <li className={cn("px-3 py-3 text-sm", active && "bg-primary/[0.03]")}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <RunStatusBadge status={run.status} />
+            {active ? (
+              <ElapsedTimer
+                startedAt={startedAt}
+                label={run.status === "queued" ? "queued" : "running"}
+              />
+            ) : null}
             <span className="text-xs text-muted-foreground">
               {new Date(run.createdAt).toLocaleString()}
             </span>
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
+          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-secondary">
+            <div
+              className={cn(
+                "h-full transition-all",
+                run.status === "failed" ? "bg-destructive" : "bg-primary",
+                active && done === 0 && "animate-pulse",
+              )}
+              style={{ width: `${Math.max(active && done === 0 ? 8 : 0, pct)}%` }}
+            />
+          </div>
+          <div className="mt-1.5 text-xs text-muted-foreground">
             {run.syncedCount} synced, {run.skippedCount} skipped, {run.failedCount} failed of{" "}
             {run.totalCount}
           </div>
+          {currentItem ? (
+            <div className="mt-2 rounded-md border bg-background/70 px-2 py-1.5 text-xs">
+              <div className="font-medium">
+                {currentItem.status === "syncing" ? "Opening pull request" : "Queued next"}
+              </div>
+              <div className="mt-0.5 truncate text-muted-foreground">
+                {currentItem.repoFullName}
+              </div>
+            </div>
+          ) : null}
           {run.error ? <div className="mt-0.5 text-xs text-rose-600">{run.error}</div> : null}
         </div>
         {active ? (
-          <Button variant="ghost" size="sm" onClick={onCancel} disabled={cancelling}>
-            {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : "Cancel"}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onCancel}
+            disabled={cancelling}
+            title="Cancel run"
+            className="h-8 w-8 shrink-0"
+          >
+            {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
           </Button>
         ) : null}
       </div>

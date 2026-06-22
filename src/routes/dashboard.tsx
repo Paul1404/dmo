@@ -28,6 +28,7 @@ import {
   type GraphInputRepo,
   type GraphOutdatedDep,
 } from "~/components/DependencyGraph";
+import { ElapsedTimer } from "~/components/ElapsedTimer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
@@ -857,14 +858,29 @@ function JobCard({
   const currentItem = active
     ? (job.items.find((i) => i.status === "merging" || i.status === "waiting_rebase") ?? null)
     : null;
+  const queuedCount = job.items.filter((i) => i.status === "queued").length;
+  const waitingCount = job.items.filter((i) => i.status === "waiting_rebase").length;
+  const startedAt = job.startedAt ?? job.createdAt;
 
   return (
-    <div className={cn("rounded-md border p-3 text-sm", jobBorderClass(job.status))}>
+    <div
+      className={cn(
+        "rounded-md border p-3 text-sm transition-colors",
+        jobBorderClass(job.status),
+        active && "shadow-sm",
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate font-medium">{job.repoFullName}</div>
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <JobStatusBadge status={job.status} />
+            {active ? (
+              <ElapsedTimer
+                startedAt={startedAt}
+                label={job.status === "queued" ? "queued" : "running"}
+              />
+            ) : null}
             <span className="tabular-nums">
               {job.mergedCount}/{job.totalCount} merged
               {job.failedCount > 0 ? `, ${job.failedCount} failed` : null}
@@ -889,23 +905,32 @@ function JobCard({
         ) : null}
       </div>
 
-      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-secondary">
         <div
           className={cn(
             "h-full transition-all",
             job.status === "failed" ? "bg-destructive" : "bg-primary",
+            active && done === 0 && "animate-pulse",
           )}
-          style={{ width: `${pct}%` }}
+          style={{ width: `${Math.max(active && done === 0 ? 8 : 0, pct)}%` }}
         />
       </div>
 
       {currentItem ? (
-        <div className="mt-2 truncate text-xs text-muted-foreground">
-          {currentItem.status === "merging" ? "Merging" : "Waiting for rebase"}: #
-          {currentItem.prNumber} {currentItem.title}
+        <div className="mt-3 rounded-md border bg-background/70 px-2 py-1.5 text-xs">
+          <div className="font-medium">
+            {currentItem.status === "merging" ? "Merging" : "Waiting for rebase"}
+          </div>
+          <div className="mt-0.5 truncate text-muted-foreground">
+            #{currentItem.prNumber} {currentItem.title}
+          </div>
         </div>
       ) : active && remaining > 0 ? (
-        <div className="mt-2 text-xs text-muted-foreground">{remaining} queued</div>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>{remaining} remaining</span>
+          {queuedCount > 0 ? <span>{queuedCount} queued</span> : null}
+          {waitingCount > 0 ? <span>{waitingCount} waiting</span> : null}
+        </div>
       ) : null}
 
       {job.error ? (
