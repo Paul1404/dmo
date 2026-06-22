@@ -25,6 +25,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { Checkbox } from "~/components/ui/checkbox";
 import { Separator } from "~/components/ui/separator";
+import { useLiveUpdates } from "~/lib/live-updates";
 import { orpc } from "~/lib/orpc";
 import { cn } from "~/lib/utils";
 import { auth } from "~/server/auth";
@@ -124,6 +125,7 @@ function classifyRepo(
 
 function OrchestratorPage() {
   const queryClient = useQueryClient();
+  useLiveUpdates(["orchestrator-runs"]);
   const [draftTemplate, setDraftTemplate] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -145,11 +147,6 @@ function OrchestratorPage() {
   const runs = useQuery({
     queryKey: ["orchestrator", "runs"],
     queryFn: () => orpc.orchestrator.listRuns(),
-    refetchInterval: (q) => {
-      const data = q.state.data as RunView[] | undefined;
-      const hasActive = data?.some((r) => r.status === "queued" || r.status === "running");
-      return hasActive ? 3_000 : false;
-    },
   });
 
   const savedTemplate = template.data?.yamlContent ?? null;

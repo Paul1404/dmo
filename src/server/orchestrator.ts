@@ -8,6 +8,7 @@ import {
   GithubRateLimitError,
   getGithubTokenForUser,
 } from "~/server/github";
+import { publishUserEvent } from "~/server/live";
 import { log } from "~/server/logger";
 
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -71,6 +72,7 @@ export async function enqueueOrchestratorRun(input: EnqueueRunInput): Promise<st
     userId: input.userId,
     repos: input.repos.length,
   });
+  publishUserEvent(input.userId, "orchestrator-runs");
   setTimeout(() => {
     void tick();
   }, 50);
@@ -98,6 +100,7 @@ export async function cancelOrchestratorRun(userId: string, runId: string): Prom
       .set({ status: "skipped", updatedAt: now })
       .where(and(eq(orchestratorRunItems.runId, runId), eq(orchestratorRunItems.status, "queued")));
   });
+  publishUserEvent(userId, "orchestrator-runs");
   return true;
 }
 
@@ -245,7 +248,10 @@ async function tick(): Promise<void> {
         .catch((err) => {
           log.error("processRun threw uncaught error", { runId: r.id, err });
         })
-        .finally(() => inFlightRuns.delete(r.id));
+        .finally(async () => {
+          await notifyRunChanged(r.id);
+          inFlightRuns.delete(r.id);
+        });
       inFlightRuns.set(r.id, p);
       return p;
     }),
@@ -266,6 +272,7 @@ async function processRun(runId: string): Promise<void> {
       .update(orchestratorRuns)
       .set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
       .where(eq(orchestratorRuns.id, runId));
+    publishUserEvent(run.userId, "orchestrator-runs");
   }
 
   let token: string;
@@ -415,6 +422,7 @@ async function markItem(
         eq(orchestratorRunItems.repoName, repoName),
       ),
     );
+  await notifyRunChanged(runId);
 }
 
 async function finalizeRun(runId: string, status: RunStatus, error?: string): Promise<void> {
@@ -429,4 +437,14 @@ async function finalizeRun(runId: string, status: RunStatus, error?: string): Pr
     })
     .where(eq(orchestratorRuns.id, runId));
   log.info("orchestrator run finalized", { runId, status, error });
+  await notifyRunChanged(runId);
+}
+
+async function notifyRunChanged(runId: string): Promise<void> {
+  const [run] = await db
+    .select({ userId: orchestratorRuns.userId })
+    .from(orchestratorRuns)
+    .where(eq(orchestratorRuns.id, runId))
+    .limit(1);
+  if (run) publishUserEvent(run.userId, "orchestrator-runs");
 }

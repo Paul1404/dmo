@@ -9,6 +9,7 @@ import {
   invalidateDependabotCache,
   probePrReadiness,
 } from "~/server/github";
+import { publishUserEvent } from "~/server/live";
 import { log } from "~/server/logger";
 
 export type MergeMethod = "merge" | "squash" | "rebase";
@@ -67,6 +68,7 @@ export async function enqueueJob(input: EnqueueInput): Promise<string> {
     repo: `${input.repoOwner}/${input.repoName}`,
     prs: input.prs.length,
   });
+  publishUserEvent(input.userId, "jobs");
   setTimeout(() => {
     void tick();
   }, 50);
@@ -99,6 +101,7 @@ export async function cancelJob(userId: string, jobId: string): Promise<boolean>
         ),
       );
   });
+  publishUserEvent(userId, "jobs");
   return true;
 }
 
@@ -240,7 +243,10 @@ async function tick(): Promise<void> {
         .catch((err) => {
           log.error("processJob threw uncaught error", { jobId: j.id, err });
         })
-        .finally(() => inFlightJobs.delete(j.id));
+        .finally(async () => {
+          await notifyJobChanged(j.id);
+          inFlightJobs.delete(j.id);
+        });
       inFlightJobs.set(j.id, p);
       return p;
     }),
@@ -257,6 +263,7 @@ async function processJob(jobId: string): Promise<void> {
       .update(mergeJobs)
       .set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
       .where(eq(mergeJobs.id, jobId));
+    publishUserEvent(job.userId, "jobs");
   }
 
   let token: string;
@@ -444,6 +451,7 @@ async function markItem(
     .update(mergeJobItems)
     .set(set)
     .where(and(eq(mergeJobItems.jobId, jobId), eq(mergeJobItems.prNumber, prNumber)));
+  await notifyJobChanged(jobId);
 }
 
 async function touchItem(jobId: string, prNumber: number): Promise<void> {
@@ -451,6 +459,7 @@ async function touchItem(jobId: string, prNumber: number): Promise<void> {
     .update(mergeJobItems)
     .set({ updatedAt: new Date() })
     .where(and(eq(mergeJobItems.jobId, jobId), eq(mergeJobItems.prNumber, prNumber)));
+  await notifyJobChanged(jobId);
 }
 
 async function finalizeJob(jobId: string, status: JobStatus, error?: string): Promise<void> {
@@ -465,4 +474,14 @@ async function finalizeJob(jobId: string, status: JobStatus, error?: string): Pr
     })
     .where(eq(mergeJobs.id, jobId));
   log.info("merge job finalized", { jobId, status, error });
+  await notifyJobChanged(jobId);
+}
+
+async function notifyJobChanged(jobId: string): Promise<void> {
+  const [job] = await db
+    .select({ userId: mergeJobs.userId })
+    .from(mergeJobs)
+    .where(eq(mergeJobs.id, jobId))
+    .limit(1);
+  if (job) publishUserEvent(job.userId, "jobs");
 }

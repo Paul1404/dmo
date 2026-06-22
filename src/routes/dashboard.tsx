@@ -42,6 +42,7 @@ import {
 } from "~/components/ui/select";
 import { Separator } from "~/components/ui/separator";
 import { authClient } from "~/lib/auth-client";
+import { useLiveUpdates } from "~/lib/live-updates";
 import { orpc } from "~/lib/orpc";
 import { cn } from "~/lib/utils";
 import { auth } from "~/server/auth";
@@ -214,6 +215,7 @@ function DashboardPage() {
   const user = Route.useLoaderData();
   const router = useRouter();
   const queryClient = useQueryClient();
+  useLiveUpdates(["jobs"]);
 
   const [repoFilter, setRepoFilter] = useState<string>("all");
   const [ecosystemFilter, setEcosystemFilter] = useState<Ecosystem | "all">("all");
@@ -232,12 +234,6 @@ function DashboardPage() {
     queryKey: ["jobs", "list"],
     queryFn: () => orpc.jobs.list(),
     retry: false,
-    refetchInterval: (q) => {
-      const data = q.state.data as JobView[] | undefined;
-      if (!data) return 10_000;
-      const hasActive = data.some((j) => j.status === "queued" || j.status === "running");
-      return hasActive ? 5_000 : 30_000;
-    },
   });
 
   const activeKeys = useMemo(() => new Set(prs.data?.activeKeys ?? []), [prs.data?.activeKeys]);
