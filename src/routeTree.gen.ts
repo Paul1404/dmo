@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as McpRouteImport } from './routes/mcp'
 import { Route as OrchestratorRouteImport } from './routes/orchestrator'
 import { Route as ReposRouteImport } from './routes/repos'
 import { Route as ApiHealthRouteImport } from './routes/api/health'
@@ -32,6 +33,11 @@ const DashboardRoute = DashboardRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const McpRoute = McpRouteImport.update({
+  id: '/mcp',
+  path: '/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OrchestratorRoute = OrchestratorRouteImport.update({
@@ -69,6 +75,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/orchestrator': typeof OrchestratorRoute
   '/repos': typeof ReposRoute
   '/api/health': typeof ApiHealthRoute
@@ -80,6 +87,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/orchestrator': typeof OrchestratorRoute
   '/repos': typeof ReposRoute
   '/api/health': typeof ApiHealthRoute
@@ -92,6 +100,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/orchestrator': typeof OrchestratorRoute
   '/repos': typeof ReposRoute
   '/api/health': typeof ApiHealthRoute
@@ -105,6 +114,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/login'
+    | '/mcp'
     | '/orchestrator'
     | '/repos'
     | '/api/health'
@@ -116,6 +126,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/login'
+    | '/mcp'
     | '/orchestrator'
     | '/repos'
     | '/api/health'
@@ -127,6 +138,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/login'
+    | '/mcp'
     | '/orchestrator'
     | '/repos'
     | '/api/health'
@@ -139,6 +151,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DashboardRoute: typeof DashboardRoute
   LoginRoute: typeof LoginRoute
+  McpRoute: typeof McpRoute
   OrchestratorRoute: typeof OrchestratorRoute
   ReposRoute: typeof ReposRoute
   ApiHealthRoute: typeof ApiHealthRoute
@@ -168,6 +181,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mcp': {
+      id: '/mcp'
+      path: '/mcp'
+      fullPath: '/mcp'
+      preLoaderRoute: typeof McpRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/orchestrator': {
@@ -219,6 +239,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DashboardRoute: DashboardRoute,
   LoginRoute: LoginRoute,
+  McpRoute: McpRoute,
   OrchestratorRoute: OrchestratorRoute,
   ReposRoute: ReposRoute,
   ApiHealthRoute: ApiHealthRoute,

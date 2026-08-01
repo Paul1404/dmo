@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -143,6 +143,51 @@ export const orchestratorRunItems = pgTable(
     branchName: text("branch_name"),
     attempts: integer("attempts").notNull().default(0),
     error: text("error"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.runId, table.repoOwner, table.repoName] })],
+);
+
+export const agentTokens = pgTable("agent_tokens", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  expiresAt: timestamp("expires_at").notNull(),
+  lastUsedAt: timestamp("last_used_at"),
+  revokedAt: timestamp("revoked_at"),
+});
+
+export const maintenanceRuns = pgTable("maintenance_runs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  status: text("status").notNull(),
+  note: text("note"),
+  snapshot: jsonb("snapshot").notNull(),
+  totalRepos: integer("total_repos").notNull(),
+  totalPrs: integer("total_prs").notNull(),
+  completedRepos: integer("completed_repos").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  finishedAt: timestamp("finished_at"),
+});
+
+export const maintenanceRunResults = pgTable(
+  "maintenance_run_results",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => maintenanceRuns.id, { onDelete: "cascade" }),
+    repoOwner: text("repo_owner").notNull(),
+    repoName: text("repo_name").notNull(),
+    status: text("status").notNull(),
+    summary: text("summary"),
+    evidence: jsonb("evidence").notNull().default({}),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.runId, table.repoOwner, table.repoName] })],
