@@ -34,6 +34,11 @@ const repositorySchema = z
   .regex(/^[^/\s]+\/[^/\s]+$/, "Use owner/name format")
   .describe("GitHub repository in owner/name format");
 
+const pullRequestSchema = z
+  .string()
+  .regex(/^[^/\s]+\/[^/#\s]+#[1-9]\d*$/, "Use owner/name#number format")
+  .describe("GitHub pull request in owner/name#number format");
+
 const evidenceSchema = z.object({
   commitShas: z.array(z.string().max(100)).max(50).optional(),
   pullRequests: z.array(z.url()).max(50).optional(),
@@ -85,12 +90,13 @@ export function createDmoMcpServer(userId: string, services: DmoMcpServices = de
         "Get current open Dependabot PRs with repository execution contracts. Use first when planning or starting fleet dependency maintenance.",
       inputSchema: {
         repositories: z.array(repositorySchema).max(100).optional(),
+        pullRequests: z.array(pullRequestSchema).max(500).optional(),
       },
       outputSchema: { snapshot: z.unknown() },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
-    async ({ repositories }) => {
-      const snapshot = await services.getFleetSnapshot(userId, repositories);
+    async ({ repositories, pullRequests }) => {
+      const snapshot = await services.getFleetSnapshot(userId, repositories, pullRequests);
       return toolResult(
         "snapshot",
         snapshot,
@@ -123,13 +129,18 @@ export function createDmoMcpServer(userId: string, services: DmoMcpServices = de
         "Freeze the current matching Dependabot fleet into an auditable run after the user has asked to execute dependency maintenance. This records scope but does not modify GitHub or deployments.",
       inputSchema: {
         repositories: z.array(repositorySchema).max(100).optional(),
+        pullRequests: z.array(pullRequestSchema).max(500).optional(),
         note: z.string().max(1_000).optional(),
       },
       outputSchema: { run: z.unknown() },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ repositories, note }) => {
-      const run = await services.createMaintenanceRun(userId, { repositories, note });
+    async ({ repositories, pullRequests, note }) => {
+      const run = await services.createMaintenanceRun(userId, {
+        repositories,
+        pullRequests,
+        note,
+      });
       return toolResult(
         "run",
         run,
