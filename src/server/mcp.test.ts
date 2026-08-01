@@ -129,7 +129,30 @@ describe("DMO MCP server", () => {
       destructiveHint: false,
     });
 
-    const result = await client.callTool({ name: "get_fleet_snapshot", arguments: {} });
+    const result = await client.callTool({
+      name: "get_fleet_snapshot",
+      arguments: { pullRequests: ["acme/app#42"] },
+    });
     expect(result.structuredContent).toEqual({ snapshot });
+  });
+
+  it("accepts exact pull-request scope for maintenance runs", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const services = fakeServices();
+    const server = createDmoMcpServer("user-1", services);
+    await server.connect(serverTransport);
+    const client = new Client({ name: "dmo-test", version: "1.0.0" });
+    clients.push(client);
+    await client.connect(clientTransport);
+
+    await client.callTool({
+      name: "create_maintenance_run",
+      arguments: { pullRequests: ["acme/app#42"], note: "single PR trial" },
+    });
+    expect(services.createMaintenanceRun).toHaveBeenCalledWith("user-1", {
+      repositories: undefined,
+      pullRequests: ["acme/app#42"],
+      note: "single PR trial",
+    });
   });
 });
