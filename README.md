@@ -18,9 +18,9 @@ GitHub and Railway write operations.
 
 Available tools:
 
-- `get_fleet_snapshot`: current Dependabot PRs and repository execution contracts
+- `get_fleet_snapshot`: current Dependabot PRs and repository execution contracts, optionally scoped to exact `owner/repo#number` keys
 - `get_repo_context`: dependencies, Dependabot config, verification commands, and deployment context
-- `create_maintenance_run`: freeze the authorized PR scope in DMO
+- `create_maintenance_run`: freeze an authorized repository or exact pull-request scope in DMO
 - `get_maintenance_run`: resume a run and inspect its evidence ledger
 - `record_run_result`: record repository outcomes, checks, commits, deployments, and blockers
 

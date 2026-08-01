@@ -69,14 +69,15 @@ async function watchedForUser(userId: string): Promise<WatchedRepoRef[]> {
     .where(eq(watchedRepos.userId, userId));
 }
 
-function requestedSet(repositories?: string[]): Set<string> | null {
-  if (!repositories || repositories.length === 0) return null;
-  return new Set(repositories.map((repo) => repo.trim().toLowerCase()));
+function normalizedSet(values?: string[]): Set<string> | null {
+  if (!values || values.length === 0) return null;
+  return new Set(values.map((value) => value.trim().toLowerCase()));
 }
 
 export async function getFleetSnapshot(
   userId: string,
   repositories?: string[],
+  pullRequests?: string[],
 ): Promise<FleetSnapshot> {
   const watched = await watchedForUser(userId);
   const token = await getGithubTokenForUser(userId);
@@ -84,12 +85,14 @@ export async function getFleetSnapshot(
     listDependabotPrs(userId, token, watched),
     listDependenciesOverview(userId, token, watched),
   ]);
-  const requested = requestedSet(repositories);
+  const requestedRepositories = normalizedSet(repositories);
+  const requestedPullRequests = normalizedSet(pullRequests);
   const profiles = new Map(overview.repos.map((repo) => [repo.fullName.toLowerCase(), repo]));
   const prsByRepo = new Map<string, DependabotPr[]>();
   for (const pr of allPrs) {
     const key = pr.repoFullName.toLowerCase();
-    if (requested && !requested.has(key)) continue;
+    if (requestedRepositories && !requestedRepositories.has(key)) continue;
+    if (requestedPullRequests && !requestedPullRequests.has(`${key}#${pr.number}`)) continue;
     const items = prsByRepo.get(key) ?? [];
     items.push(pr);
     prsByRepo.set(key, items);
@@ -153,10 +156,24 @@ export async function getRepoMaintenanceContext(userId: string, repository: stri
 
 export async function createMaintenanceRun(
   userId: string,
-  input: { repositories?: string[]; note?: string },
+  input: { repositories?: string[]; pullRequests?: string[]; note?: string },
 ) {
   assertMutationsEnabled();
-  const fleet = await getFleetSnapshot(userId, input.repositories);
+  const fleet = await getFleetSnapshot(userId, input.repositories, input.pullRequests);
+  const requestedPullRequests = normalizedSet(input.pullRequests);
+  if (requestedPullRequests) {
+    const matched = new Set(
+      fleet.repos.flatMap((repo) =>
+        repo.prs.map((pr) => `${pr.repoFullName.toLowerCase()}#${pr.number}`),
+      ),
+    );
+    const missing = Array.from(requestedPullRequests).filter(
+      (pullRequest) => !matched.has(pullRequest),
+    );
+    if (missing.length > 0) {
+      throw new Error(`Open watched Dependabot PRs not found: ${missing.join(", ")}`);
+    }
+  }
   if (fleet.totalPrs === 0) throw new Error("No open Dependabot PRs match this run");
   const id = crypto.randomUUID();
   const snapshot: StoredSnapshot = {
