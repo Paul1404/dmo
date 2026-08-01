@@ -1,7 +1,42 @@
 # DMO
 
 Dependabot Mass Orchestration. Log in with GitHub, see every open Dependabot PR across your
-repositories on a single dashboard, then approve and merge them in bulk.
+repositories on a single dashboard, merge low-risk updates in bulk, or copy one autonomous Codex
+mission for a full fleet maintenance pass.
+
+The Codex mission scans each repository first and includes its package manager, frozen install
+command, available verification scripts, default branch, archived state, deployment provider, and
+configured Railway health path. The generated handoff tells the agent to coordinate shared
+lockfiles, treat majors as migrations, pin only at real compatibility boundaries, watch CI and the
+deployment to terminal state, and reconcile the Dependabot queue when finished.
+
+## Codex MCP integration
+
+DMO exposes an authenticated Streamable HTTP MCP server at `/mcp`. It gives Codex live fleet
+context and an auditable maintenance ledger without exposing the GitHub OAuth token or duplicating
+GitHub and Railway write operations.
+
+Available tools:
+
+- `get_fleet_snapshot`: current Dependabot PRs and repository execution contracts
+- `get_repo_context`: dependencies, Dependabot config, verification commands, and deployment context
+- `create_maintenance_run`: freeze the authorized PR scope in DMO
+- `get_maintenance_run`: resume a run and inspect its evidence ledger
+- `record_run_result`: record repository outcomes, checks, commits, deployments, and blockers
+
+Create a token under **Repos → Codex agent access**. DMO shows the plaintext token once and stores
+only its SHA-256 hash. Then configure Codex with the deployed DMO URL and an environment variable:
+
+```toml
+[mcp_servers.dmo]
+url = "https://your-dmo.example/mcp"
+bearer_token_env_var = "DMO_MCP_TOKEN"
+default_tools_approval_mode = "writes"
+tool_timeout_sec = 120
+```
+
+Restart Codex after changing MCP configuration. Inventory tools are marked read-only. Creating a
+run and recording evidence are auditable DMO writes, but neither changes a repository or deployment.
 
 ## Stack
 
@@ -60,4 +95,4 @@ See `.env.example`.
 - `bun run db:migrate`: apply migrations
 - `bun run lint`: Biome
 - `bun run typecheck`: `tsc --noEmit`
-- `bun test`: Vitest
+- `bun run test`: Vitest

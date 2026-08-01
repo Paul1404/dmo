@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  packageVerificationCommands,
   parseDockerfile,
   parsePackageJson,
   parsePyprojectToml,
+  parseRailwayHealthcheck,
   parseRequirementsTxt,
 } from "~/server/dependencies";
 
@@ -60,6 +62,33 @@ describe("parsePackageJson", () => {
 
   it("returns an empty array for invalid JSON", () => {
     expect(parsePackageJson("{ not json")).toEqual([]);
+  });
+});
+
+describe("automation metadata", () => {
+  it("prefers a single verify script and uses the detected runner", () => {
+    const content = JSON.stringify({
+      scripts: { verify: "bun test", test: "vitest", build: "vite build" },
+    });
+    expect(packageVerificationCommands(content, "bun")).toEqual(["bun run verify"]);
+  });
+
+  it("builds an ordered verification contract from available scripts", () => {
+    const content = JSON.stringify({
+      scripts: { build: "vite build", test: "vitest", typecheck: "tsc" },
+    });
+    expect(packageVerificationCommands(content, "npm")).toEqual([
+      "npm run typecheck",
+      "npm run test",
+      "npm run build",
+    ]);
+  });
+
+  it("reads Railway's configured healthcheck path", () => {
+    expect(parseRailwayHealthcheck('[deploy]\nhealthcheckPath = "/api/health"')).toBe(
+      "/api/health",
+    );
+    expect(parseRailwayHealthcheck("[deploy]\nrestartPolicyType = 'ON_FAILURE'")).toBeNull();
   });
 });
 

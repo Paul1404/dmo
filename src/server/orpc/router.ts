@@ -2,6 +2,7 @@ import { ORPCError, os } from "@orpc/server";
 import { eq } from "drizzle-orm";
 import * as v from "valibot";
 import { parse as parseYaml } from "yaml";
+import { createAgentToken, listAgentTokens, revokeAgentToken } from "~/server/agent-access";
 import { db } from "~/server/db";
 import { dependabotTemplates, watchedRepos } from "~/server/db/schema";
 import { invalidateDependenciesCache, listDependenciesOverview } from "~/server/dependencies";
@@ -20,6 +21,7 @@ import {
   assertAllowedUser,
   assertCanEnqueueJob,
   assertCanEnqueueRun,
+  assertMutationsEnabled,
   assertRateLimit,
 } from "~/server/limits";
 import { log } from "~/server/logger";
@@ -95,6 +97,30 @@ async function getWatchedRepos(userId: string): Promise<{ owner: string; name: s
 
 export const router = {
   me: authed.handler(async ({ context }) => context.user),
+
+  agentAccess: {
+    list: authed.handler(async ({ context }) => listAgentTokens(context.user.id)),
+
+    create: authed
+      .input(
+        v.object({
+          name: v.pipe(v.string(), v.trim(), v.minLength(1), v.maxLength(100)),
+        }),
+      )
+      .handler(async ({ context, input }) => {
+        assertMutationsEnabled();
+        return createAgentToken(context.user.id, input.name);
+      }),
+
+    revoke: authed
+      .input(v.object({ tokenId: v.pipe(v.string(), v.uuid()) }))
+      .handler(async ({ context, input }) => {
+        assertMutationsEnabled();
+        const revoked = await revokeAgentToken(context.user.id, input.tokenId);
+        if (!revoked) throw new ORPCError("NOT_FOUND", { message: "Agent token not found" });
+        return { revoked: true };
+      }),
+  },
 
   repos: {
     list: githubGuard.handler(async ({ context }) => {

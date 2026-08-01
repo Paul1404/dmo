@@ -43,6 +43,7 @@ import {
 import { Separator } from "~/components/ui/separator";
 import { authClient } from "~/lib/auth-client";
 import { useLiveUpdates } from "~/lib/live-updates";
+import { buildMaintenanceMission } from "~/lib/maintenance-mission";
 import { orpc } from "~/lib/orpc";
 import { cn } from "~/lib/utils";
 import { auth } from "~/server/auth";
@@ -106,111 +107,6 @@ function prKey(pr: DependabotPr) {
   return `${pr.repoFullName}#${pr.number}`;
 }
 
-function buildLlmPrompt(prs: DependabotPr[]): string {
-  const byRepo = new Map<string, DependabotPr[]>();
-  for (const p of prs) {
-    const arr = byRepo.get(p.repoFullName) ?? [];
-    arr.push(p);
-    byRepo.set(p.repoFullName, arr);
-  }
-
-  const sections: string[] = [];
-  for (const [repo, list] of byRepo.entries()) {
-    list.sort((a, b) => a.number - b.number);
-    const lines = list.map((p) => {
-      const dep = p.dependency ?? "unknown";
-      const versions =
-        p.fromVersion && p.toVersion
-          ? `${p.fromVersion} to ${p.toVersion} (Dependabot target)`
-          : "version not parsed";
-      return [
-        `- #${p.number} ${dep} (${p.ecosystem}, ${p.updateType}): ${versions}`,
-        `  ${p.htmlUrl}`,
-        `  title: ${p.title}`,
-      ].join("\n");
-    });
-    sections.push(
-      `## ${repo} (${list.length} open Dependabot PR${list.length === 1 ? "" : "s"})\n\n${lines.join("\n")}`,
-    );
-  }
-
-  const total = prs.length;
-  const repoCount = byRepo.size;
-
-  return `I have ${total} open Dependabot PR${total === 1 ? "" : "s"} across ${repoCount} repo${repoCount === 1 ? "" : "s"}. Help me push every dependency to its real latest stable version, not just the version Dependabot proposed. When that is not viable, leave an explicit Dependabot ignore comment so the same PR does not come back next week. Do not merge anything before I confirm the plan.
-
-${sections.join("\n\n")}
-
-How to work through them. Read this fully before touching anything.
-
-## Phase 1: find the real target version
-
-Dependabot's number is a floor, not a target. Training data is stale. For every PR, look up the actual latest published version from the source of truth, not from memory:
-
-- npm: \`bun info <pkg> version\` or \`npm view <pkg> version\` (and \`npm view <pkg> versions --json\` to see the full ladder)
-- pypi: \`pip index versions <pkg>\` or pypi.org/project/<pkg>
-- cargo: \`cargo search <pkg> --limit 1\` or crates.io
-- go modules: \`go list -m -versions <module>\`
-- docker: registry tag list, e.g. \`crane ls <image>\` or the registry HTTP API
-- github actions: the action repo's GitHub releases (\`gh release list -R <owner>/<repo>\`)
-- bundler / composer / maven / gradle: the relevant registry
-
-If the real latest is newer than Dependabot's target, the real latest is your target. Treat Dependabot's PR as a starting branch you will edit, not as the final answer.
-
-For each dependency also collect:
-- Upstream release notes between current and real-latest. Read every major and minor entry in that range, not just the top one.
-- Coupled packages that must move together. Common families: \`react\` + \`react-dom\` + \`@types/react\` + \`@types/react-dom\`, \`@tanstack/*\` (router, query, start, form move as a set), \`drizzle-orm\` + \`drizzle-kit\`, \`vitest\` + \`@vitest/*\` + \`@vitest/coverage-*\`, \`eslint\` + every \`eslint-*\` plugin, \`@typescript-eslint/*\`, \`vite\` + the framework plugin, \`@types/x\` follows runtime \`x\`. Also check declared peer dependencies in the manifest.
-- Whether the new version drops a runtime we still target (Node, Bun, Python, Ruby version floors).
-- Whether the new version changes module format (CJS to ESM only is a common trap).
-
-## Phase 2: pick the move for each PR
-
-Every PR gets exactly one of three outcomes.
-
-**A. Push to cutting edge.** The real latest is reachable and the diff is safe. Either:
-- Check out the Dependabot branch, edit the manifest to the real latest, regenerate the lockfile, and force-push to the same branch. \`gh pr checkout <num>\` then the lockfile command for the ecosystem (\`bun install\`, \`npm install\`, \`pip install -e .\`, \`cargo update -p <pkg>\`, \`go get <module>@latest && go mod tidy\`).
-- If multiple coupled packages need to move as a set, close the individual Dependabot PRs and open one coordinated PR that bumps the whole family to latest. Run the full local test suite before pushing.
-
-**B. Merge as proposed.** Dependabot's target already equals the real latest, the diff is clean, and no coupled package is lagging behind. This is rare for active ecosystems.
-
-**C. Cannot upgrade right now.** Acceptable reasons: requires a peer we cannot bump yet, drops a runtime version we still need, removes an API we depend on, ESM-only flip that breaks the build, known upstream regression, license change, security advisory on the target. "I don't feel like it" is not a reason.
-
-For every C, leave an explicit Dependabot ignore comment so the same PR stops coming back. Pick the narrowest scope that matches the reason:
-
-- \`@dependabot ignore this minor version\` to skip one bad minor and let the next minor through
-- \`@dependabot ignore this major version\` to stay on the current major (use this when a major bump is blocked by a peer we cannot move)
-- \`@dependabot ignore this dependency\` only if we have intentionally pinned and never want updates from Dependabot for this package
-
-Post the comment and the reason in one go, then close the PR:
-
-\`\`\`
-gh pr comment <num> --body $'@dependabot ignore this major version\\n\\nReason: <one line, e.g. requires Node 22, we still target 20>'
-gh pr close <num>
-\`\`\`
-
-The reason line matters. It is the only thing future-me has to understand why the ignore exists.
-
-## Phase 3: merge order and safety
-
-1. Inside a repo, order by blast radius from low to high: leaf libs first (nothing else depends on them), then shared utilities, then framework cores and toolchain (vite, typescript, bun, drizzle-kit, biome, vitest, tanstack-*). Inside each tier: patch, then minor, then major.
-2. Never run two merges in parallel that touch the same lockfile. After every merge, rebase the rest: \`gh pr comment <num> --body "@dependabot rebase"\` or \`gh pr update-branch <num>\`. Wait for CI green on the rebased PR before the next merge.
-3. Before merging, verify required status checks with \`gh pr checks <num>\`. A failure that the bump itself produced means move the PR to outcome C and ignore it. A flake means re-run, not merge through.
-4. Match the repo's merge policy: \`gh pr merge <num> --squash\` (or --merge / --rebase). If self-approval is required, \`gh pr review <num> --approve\` first.
-5. For coordinated multi-package PRs you opened yourself, run build, typecheck, and tests locally before pushing the final commit. Do not rely on CI alone for those.
-
-## Phase 4: report
-
-When done, for each repo produce four lists:
-- pushed to latest (PR or coordinated bump, with the final version landed)
-- merged as proposed (Dependabot target already equalled latest)
-- ignored with comment (dependency, ignore scope, reason, PR closed)
-- needs human review (PR, what you tried, what blocked it)
-
-## Now start
-
-Step one before any action: for every PR above, print one line with \`<repo>#<num> <dep>: current=<x> dependabot=<y> latest=<z> -> outcome A/B/C, reason\`. Do not check out any branch, do not comment, do not merge until I confirm that plan.`;
-}
-
 function DashboardPage() {
   const user = Route.useLoaderData();
   const router = useRouter();
@@ -222,6 +118,7 @@ function DashboardPage() {
   const [updateTypeFilter, setUpdateTypeFilter] = useState<UpdateType | "all">("all");
   const [mergeMethod, setMergeMethod] = useState<"squash" | "merge" | "rebase">("squash");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [missionCopying, setMissionCopying] = useState(false);
 
   const prs = useQuery({
     queryKey: ["dependabot", "list"],
@@ -375,15 +272,23 @@ function DashboardPage() {
       toast.error("No PRs to copy");
       return;
     }
-    const prompt = buildLlmPrompt(source);
+    setMissionCopying(true);
     try {
+      const overview = await queryClient.fetchQuery({
+        queryKey: ["dependencies", "overview"],
+        queryFn: () => orpc.dependencies.overview(),
+        staleTime: 5 * 60_000,
+      });
+      const prompt = buildMaintenanceMission(source, overview);
       await navigator.clipboard.writeText(prompt);
       const scope = selectedPrs.length > 0 ? "selected" : "filtered";
       toast.success(
-        `Copied prompt for ${source.length} ${scope} PR${source.length === 1 ? "" : "s"}`,
+        `Copied Codex mission for ${source.length} ${scope} PR${source.length === 1 ? "" : "s"}`,
       );
-    } catch {
-      toast.error("Clipboard blocked. Check browser permissions.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not build the Codex mission");
+    } finally {
+      setMissionCopying(false);
     }
   }
 
@@ -558,11 +463,15 @@ function DashboardPage() {
                   variant="outline"
                   size="sm"
                   onClick={handleCopyLlmPrompt}
-                  disabled={filtered.length === 0 && selectedPrs.length === 0}
-                  title="Copy a prompt you can paste into Claude Code or another LLM to merge these PRs carefully"
+                  disabled={(filtered.length === 0 && selectedPrs.length === 0) || missionCopying}
+                  title="Copy one autonomous Codex mission with repo-specific install, verification, and deployment context"
                 >
-                  <ClipboardCopy className="h-4 w-4" />
-                  Copy LLM prompt
+                  {missionCopying ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ClipboardCopy className="h-4 w-4" />
+                  )}
+                  {missionCopying ? "Building mission" : "Copy Codex mission"}
                 </Button>
                 <Select
                   value={mergeMethod}

@@ -2,7 +2,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, redirect, useRouter } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
-import { ArrowLeft, Check, GitBranch, Loader2, Lock, Save, Search, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  ClipboardCopy,
+  GitBranch,
+  KeyRound,
+  Loader2,
+  Lock,
+  Save,
+  Search,
+  Trash2,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "~/components/ui/badge";
@@ -41,6 +52,8 @@ function ReposPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Set<string> | null>(null);
+  const [tokenName, setTokenName] = useState("Codex desktop");
+  const [newAgentToken, setNewAgentToken] = useState<string | null>(null);
 
   const accessible = useQuery({
     queryKey: ["repos", "accessible"],
@@ -54,6 +67,12 @@ function ReposPage() {
     queryFn: () => orpc.repos.getWatched(),
     retry: false,
     staleTime: 60_000,
+  });
+
+  const agentTokens = useQuery({
+    queryKey: ["agent-access", "list"],
+    queryFn: () => orpc.agentAccess.list(),
+    retry: false,
   });
 
   const initialSelected = useMemo(() => {
@@ -106,6 +125,35 @@ function ReposPage() {
       toast.error(err instanceof Error ? err.message : "Failed to save");
     },
   });
+
+  const createToken = useMutation({
+    mutationFn: () => orpc.agentAccess.create({ name: tokenName }),
+    onSuccess: (data) => {
+      setNewAgentToken(data.token);
+      queryClient.invalidateQueries({ queryKey: ["agent-access", "list"] });
+      toast.success("Agent token created. Copy it now; DMO will not show it again.");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Token creation failed"),
+  });
+
+  const revokeToken = useMutation({
+    mutationFn: (tokenId: string) => orpc.agentAccess.revoke({ tokenId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent-access", "list"] });
+      toast.success("Agent token revoked");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Token revocation failed"),
+  });
+
+  async function copyAgentToken() {
+    if (!newAgentToken) return;
+    try {
+      await navigator.clipboard.writeText(newAgentToken);
+      toast.success("Agent token copied");
+    } catch {
+      toast.error("Clipboard blocked. Select and copy the token manually.");
+    }
+  }
 
   function selectAllFiltered() {
     const next = new Set(selected);
@@ -304,6 +352,115 @@ function ReposPage() {
                   );
                 })}
               </ul>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-4 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+                <KeyRound className="h-4 w-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold">Codex agent access</div>
+                <div className="text-xs text-muted-foreground">
+                  Connect Codex directly to DMO at <code>/mcp</code>. Tokens expire after 180 days
+                  and can be revoked here at any time.
+                </div>
+              </div>
+            </div>
+
+            {newAgentToken ? (
+              <div className="space-y-2 rounded-md border border-amber-500/35 bg-amber-500/5 p-3">
+                <div className="text-xs font-medium text-amber-500">
+                  Copy this token now. Only its hash is stored.
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    value={newAgentToken}
+                    onFocus={(event) => event.currentTarget.select()}
+                    className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 font-mono text-xs outline-none"
+                  />
+                  <Button variant="outline" size="sm" onClick={copyAgentToken}>
+                    <ClipboardCopy className="h-4 w-4" />
+                    Copy
+                  </Button>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline"
+                  onClick={() => setNewAgentToken(null)}
+                >
+                  I saved it
+                </button>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={tokenName}
+                onChange={(event) => setTokenName(event.target.value)}
+                maxLength={100}
+                placeholder="Token name"
+                className="h-9 min-w-[220px] flex-1 rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+              <Button
+                size="sm"
+                onClick={() => createToken.mutate()}
+                disabled={!tokenName.trim() || createToken.isPending}
+              >
+                {createToken.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <KeyRound className="h-4 w-4" />
+                )}
+                Create token
+              </Button>
+            </div>
+
+            <Separator />
+
+            {agentTokens.isLoading ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading agent tokens
+              </div>
+            ) : agentTokens.isError ? (
+              <div className="text-xs text-destructive">{(agentTokens.error as Error).message}</div>
+            ) : agentTokens.data?.length ? (
+              <ul className="divide-y rounded-md border">
+                {agentTokens.data.map((token) => (
+                  <li
+                    key={token.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{token.name}</div>
+                      <div className="text-xs text-muted-foreground">
+                        Last used{" "}
+                        {token.lastUsedAt ? new Date(token.lastUsedAt).toLocaleString() : "never"}
+                        {" · "}expires {new Date(token.expiresAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => revokeToken.mutate(token.id)}
+                      disabled={revokeToken.isPending && revokeToken.variables === token.id}
+                    >
+                      {revokeToken.isPending && revokeToken.variables === token.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
+                      Revoke
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-xs text-muted-foreground">No active agent tokens.</div>
             )}
           </CardContent>
         </Card>

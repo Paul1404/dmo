@@ -23,6 +23,19 @@ export type RepoDependencies = {
   dependencies: Dependency[];
   error: string | null;
   scanned: { npm: boolean; docker: boolean; python: boolean };
+  automation: RepoAutomationProfile;
+};
+
+export type PackageManager = "bun" | "npm" | "pnpm" | "yarn" | "python" | "unknown";
+
+export type RepoAutomationProfile = {
+  archived: boolean;
+  defaultBranch: string;
+  packageManager: PackageManager;
+  installCommand: string | null;
+  verifyCommands: string[];
+  deploymentProvider: "railway" | "render" | "fly" | "vercel" | "unknown";
+  healthcheckPath: string | null;
 };
 
 export type DependenciesOverview = {
@@ -87,6 +100,46 @@ export function parsePackageJson(content: string): Dependency[] {
   } catch {
     return [];
   }
+}
+
+export function packageVerificationCommands(content: string, manager: PackageManager): string[] {
+  try {
+    const parsed = JSON.parse(content) as { scripts?: Record<string, string> };
+    const scripts = parsed.scripts ?? {};
+    const runner = manager === "bun" ? "bun run" : manager === "yarn" ? "yarn" : `${manager} run`;
+    const preferred = ["verify", "typecheck", "lint", "test", "build"];
+    if (scripts.verify) return [`${runner} verify`];
+    return preferred.filter((name) => scripts[name]).map((name) => `${runner} ${name}`);
+  } catch {
+    return [];
+  }
+}
+
+export function parseRailwayHealthcheck(content: string): string | null {
+  const match = content.match(/^\s*healthcheckPath\s*=\s*["']([^"']+)["']/m);
+  return match?.[1] ?? null;
+}
+
+function packageManagerFor(files: Set<string>, hasPython: boolean): PackageManager {
+  if (files.has("bun.lock") || files.has("bun.lockb")) return "bun";
+  if (files.has("pnpm-lock.yaml")) return "pnpm";
+  if (files.has("yarn.lock")) return "yarn";
+  if (files.has("package-lock.json")) return "npm";
+  if (files.has("package.json")) return "npm";
+  if (hasPython) return "python";
+  return "unknown";
+}
+
+function installCommandFor(manager: PackageManager): string | null {
+  const commands: Record<PackageManager, string | null> = {
+    bun: "bun install --frozen-lockfile",
+    npm: "npm ci",
+    pnpm: "pnpm install --frozen-lockfile",
+    yarn: "yarn install --immutable",
+    python: "use the repository's locked Python install command",
+    unknown: null,
+  };
+  return commands[manager];
 }
 
 export function parseDockerfile(content: string): Dependency[] {
@@ -193,13 +246,39 @@ async function scanRepo(octokit: Octokit, repo: WatchedRepoRef): Promise<RepoDep
     dependencies: [],
     error: null,
     scanned: { npm: false, docker: false, python: false },
+    automation: {
+      archived: false,
+      defaultBranch: "main",
+      packageManager: "unknown",
+      installCommand: null,
+      verifyCommands: [],
+      deploymentProvider: "unknown",
+      healthcheckPath: null,
+    },
   };
 
+  const [metadata, root] = await Promise.all([
+    octokit.rest.repos.get({ owner: repo.owner, repo: repo.name }),
+    octokit.rest.repos.getContent({ owner: repo.owner, repo: repo.name, path: "" }),
+  ]);
+  const rootFiles = new Set(
+    Array.isArray(root.data)
+      ? root.data.filter((entry) => entry.type === "file").map((entry) => entry.name)
+      : [],
+  );
+  result.automation.archived = metadata.data.archived;
+  result.automation.defaultBranch = metadata.data.default_branch;
+
+  const maybeFetch = (path: string) =>
+    rootFiles.has(path)
+      ? fetchFileContent(octokit, repo.owner, repo.name, path)
+      : Promise.resolve(null);
   const tasks = await Promise.allSettled([
-    fetchFileContent(octokit, repo.owner, repo.name, "package.json"),
-    fetchFileContent(octokit, repo.owner, repo.name, "Dockerfile"),
-    fetchFileContent(octokit, repo.owner, repo.name, "pyproject.toml"),
-    fetchFileContent(octokit, repo.owner, repo.name, "requirements.txt"),
+    maybeFetch("package.json"),
+    maybeFetch("Dockerfile"),
+    maybeFetch("pyproject.toml"),
+    maybeFetch("requirements.txt"),
+    maybeFetch("railway.toml"),
   ]);
 
   // Auth errors are non-recoverable — surface immediately. Rate-limit on a single file
@@ -211,11 +290,18 @@ async function scanRepo(octokit: Octokit, repo: WatchedRepoRef): Promise<RepoDep
     }
   }
 
-  const [pkgRes, dockerRes, pyprojectRes, requirementsRes] = tasks;
+  const [pkgRes, dockerRes, pyprojectRes, requirementsRes, railwayRes] = tasks;
+  const hasPython = rootFiles.has("pyproject.toml") || rootFiles.has("requirements.txt");
+  result.automation.packageManager = packageManagerFor(rootFiles, hasPython);
+  result.automation.installCommand = installCommandFor(result.automation.packageManager);
 
   if (pkgRes.status === "fulfilled" && pkgRes.value) {
     result.dependencies.push(...parsePackageJson(pkgRes.value));
     result.scanned.npm = true;
+    result.automation.verifyCommands = packageVerificationCommands(
+      pkgRes.value,
+      result.automation.packageManager,
+    );
   }
   if (dockerRes.status === "fulfilled" && dockerRes.value) {
     result.dependencies.push(...parseDockerfile(dockerRes.value));
@@ -236,6 +322,17 @@ async function scanRepo(octokit: Octokit, repo: WatchedRepoRef): Promise<RepoDep
       result.dependencies.push(dep);
     }
     result.scanned.python = true;
+  }
+
+  if (railwayRes.status === "fulfilled" && railwayRes.value) {
+    result.automation.deploymentProvider = "railway";
+    result.automation.healthcheckPath = parseRailwayHealthcheck(railwayRes.value);
+  } else if (rootFiles.has("render.yaml")) {
+    result.automation.deploymentProvider = "render";
+  } else if (rootFiles.has("fly.toml")) {
+    result.automation.deploymentProvider = "fly";
+  } else if (rootFiles.has("vercel.json")) {
+    result.automation.deploymentProvider = "vercel";
   }
 
   const errors = tasks
@@ -298,6 +395,15 @@ export async function listDependenciesOverview(
           dependencies: [],
           error: err instanceof Error ? err.message : String(err),
           scanned: { npm: false, docker: false, python: false },
+          automation: {
+            archived: false,
+            defaultBranch: "main",
+            packageManager: "unknown",
+            installCommand: null,
+            verifyCommands: [],
+            deploymentProvider: "unknown",
+            healthcheckPath: null,
+          },
         };
       }
     }
