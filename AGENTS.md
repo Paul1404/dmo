@@ -24,6 +24,8 @@ It uses Bun, TanStack Start, React, oRPC, better-auth, Drizzle, PostgreSQL, GitH
 - MCP tools must reuse application business logic instead of adding direct database or provider writes.
 - Preserve exact repository and pull-request scope in generated missions.
 - A passing build is not deployment proof. Record terminal CI and deployment evidence separately.
+- better-auth 1.7 keys accounts on `(issuer, account_id)`. Migrations for populated account tables must add `issuer` nullable, backfill OAuth rows as `local:oauth:<provider>`, then enforce `NOT NULL` and the compound unique index.
+- Railway provides the client address in `X-Real-IP`; keep better-auth configured to read the trusted edge header so visitors do not share one rate-limit bucket.
 
 ## Commands
 
